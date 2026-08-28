@@ -26,3 +26,4 @@ test-apps
 video
 pnpm-lock.yaml
 md
+.turbo
