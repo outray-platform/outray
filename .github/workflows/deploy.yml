@@ -6,6 +6,9 @@ on:
 
 jobs:
   deploy:
+    # The shared edge is deployed from `next` by Woodpecker. Never let this
+    # legacy `main` workflow replace its tunnel, status, or cron artifacts.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
