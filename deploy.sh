@@ -9,36 +9,51 @@ REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379}"
 REDIS_TUNNEL_TTL_SECONDS="${REDIS_TUNNEL_TTL_SECONDS:-120}"
 REDIS_HEARTBEAT_INTERVAL_MS="${REDIS_HEARTBEAT_INTERVAL_MS:-20000}"
 
-TIMESCALE_URL="${TIMESCALE_URL}"
+# Edge-only runtime configuration
+TINYBIRD_API_HOST="${TINYBIRD_API_HOST:-}"
+TINYBIRD_INGEST_TOKEN="${TINYBIRD_INGEST_TOKEN:-}"
+DATABASE_SSL_REJECT_UNAUTHORIZED="${DATABASE_SSL_REJECT_UNAUTHORIZED:-true}"
+OUTRAY_API_KEY="${OUTRAY_API_KEY:-}"
+OUTRAY_OTLP_ENDPOINT="${OUTRAY_OTLP_ENDPOINT:-}"
 
+# Uptime is rolled out in stages. The renderer and probe have separate deploys;
+# this script owns only the tunnel edge and Caddy route.
+UPTIME_ENABLED="${UPTIME_ENABLED:-false}"
+OUTRAY_DASHBOARD_URL="${OUTRAY_DASHBOARD_URL:-}"
+OUTRAY_STATUS_URL="${OUTRAY_STATUS_URL:-}"
+STATUS_EDGE_SECRET="${STATUS_EDGE_SECRET:-}"
+STATUS_PORT=4323
+
+if [ "$UPTIME_ENABLED" = "true" ]; then
+  for required_name in OUTRAY_DASHBOARD_URL OUTRAY_STATUS_URL STATUS_EDGE_SECRET DATABASE_URL; do
+    if [ -z "${!required_name:-}" ]; then
+      echo "❌ $required_name is required before enabling Uptime." >&2
+      exit 1
+    fi
+  done
+  case "$OUTRAY_DASHBOARD_URL" in https://*) ;; *) echo "❌ OUTRAY_DASHBOARD_URL must be HTTPS." >&2; exit 1 ;; esac
+  case "$OUTRAY_STATUS_URL" in
+    https://status.outray.app|https://status.outray.app/) ;;
+    *) echo "❌ OUTRAY_STATUS_URL must be https://status.outray.app for this edge route." >&2; exit 1 ;;
+  esac
+fi
 # Tunnel Server Config
+BASE_DOMAIN="${BASE_DOMAIN:-outray.app}"
 BLUE_PORT=3547
 GREEN_PORT=3548
 BLUE_NAME="outray-blue"
 GREEN_NAME="outray-green"
 
-# Run Tiger Data (TimescaleDB) migrations
-echo "🐯 Running Tiger Data migrations..."
-cd /root/outray
-if [ -n "$TIMESCALE_URL" ]; then
-  # Run migration files (not the full setup script which drops tables)
-  for migration in deploy/migrations/*.sql; do
-    if [ -f "$migration" ]; then
-      echo "  Running $migration..."
-      if ! psql "$TIMESCALE_URL" -f "$migration"; then
-        echo "❌ Failed to run migration: $migration" >&2
-      fi
-    fi
-  done
-  echo "✅ Tiger Data migrations complete."
-else
-  echo "⚠️ TIMESCALE_URL not set, skipping migrations."
+# Tinybird resources must be deployed before promoting the tunnel runtime.
+if [ -z "$TINYBIRD_API_HOST" ] || [ -z "$TINYBIRD_INGEST_TOKEN" ]; then
+  echo "❌ TINYBIRD_API_HOST and TINYBIRD_INGEST_TOKEN are required for tunnel analytics." >&2
+  exit 1
 fi
 
 cd $APP_DIR
 
 # Install Server dependencies
-npm install --production
+npm install --omit=dev --engine-strict --no-audit --no-fund
 
 # Determine which instance is currently running
 if pm2 list | grep -q "$BLUE_NAME.*online"; then
@@ -73,50 +88,24 @@ echo "🔵 Current active: $CURRENT_COLOR (or none)"
 echo "🟢 Deploying to: $TARGET_COLOR (Tunnel Server: $TARGET_NAME on Port $TARGET_PORT)"
 
 # 1. Start Tunnel Server
-BASE_DOMAIN="outray.app" \
-WEB_API_URL="https://outray.dev/api" \
+BASE_DOMAIN="$BASE_DOMAIN" \
+WEB_API_URL="${WEB_API_URL:-${OUTRAY_DASHBOARD_URL:-https://outray.co}/api}" \
 PORT=$TARGET_PORT \
+TUNNEL_BIND_HOST="127.0.0.1" \
 REDIS_URL="$REDIS_URL" \
 REDIS_TUNNEL_TTL_SECONDS="$REDIS_TUNNEL_TTL_SECONDS" \
 REDIS_HEARTBEAT_INTERVAL_MS="$REDIS_HEARTBEAT_INTERVAL_MS" \
-TIMESCALE_URL="$TIMESCALE_URL" \
+TINYBIRD_API_HOST="$TINYBIRD_API_HOST" \
+TINYBIRD_INGEST_TOKEN="$TINYBIRD_INGEST_TOKEN" \
+DATABASE_URL="$DATABASE_URL" \
+DATABASE_SSL_REJECT_UNAUTHORIZED="$DATABASE_SSL_REJECT_UNAUTHORIZED" \
+OUTRAY_API_KEY="$OUTRAY_API_KEY" \
+OUTRAY_OTLP_ENDPOINT="$OUTRAY_OTLP_ENDPOINT" \
+UPTIME_ENABLED="$UPTIME_ENABLED" \
+STATUS_EDGE_SECRET="$STATUS_EDGE_SECRET" \
+STATUS_PORT="$STATUS_PORT" \
+INTERNAL_API_SECRET="$INTERNAL_API_SECRET" \
 pm2 start dist/server.js --name $TARGET_NAME --update-env --force
-
-# 1.5 Start Internal Check Service
-echo "🔍 Starting Internal Check Service..."
-cd ../internal-check
-npm install --production
-# Restart if exists, otherwise start new (prevents duplicates without downtime)
-if pm2 list | grep -q "outray-internal-check"; then
-  DATABASE_URL="$DATABASE_URL" \
-  PORT=3001 \
-  pm2 restart "outray-internal-check" --update-env
-else
-  DATABASE_URL="$DATABASE_URL" \
-  PORT=3001 \
-  pm2 start dist/index.js --name "outray-internal-check"
-fi
-cd $APP_DIR
-
-# 1.6 Start Cron Service
-echo "⏰ Starting Cron Service..."
-cd ../cron
-npm install --production
-# Restart if exists, otherwise start new (prevents duplicates without downtime)
-if pm2 list | grep -q "outray-cron"; then
-  REDIS_URL="$REDIS_URL" \
-  TIMESCALE_URL="$TIMESCALE_URL" \
-  DATABASE_URL="$DATABASE_URL" \
-  PAYSTACK_SECRET_KEY="$PAYSTACK_SECRET_KEY" \
-  pm2 restart "outray-cron" --update-env
-else
-  REDIS_URL="$REDIS_URL" \
-  TIMESCALE_URL="$TIMESCALE_URL" \
-  DATABASE_URL="$DATABASE_URL" \
-  PAYSTACK_SECRET_KEY="$PAYSTACK_SECRET_KEY" \
-  pm2 start dist/index.js --name "outray-cron"
-fi
-cd $APP_DIR
 
 echo "⏳ Waiting for tunnel server to be ready..."
 sleep 5
@@ -127,15 +116,61 @@ if ! pm2 list | grep -q "$TARGET_NAME.*online"; then
   exit 1
 fi
 
+if ! curl --fail --silent --max-time 5 -H "Host: ${BASE_DOMAIN}" "http://127.0.0.1:$TARGET_PORT/health" >/dev/null; then
+  echo "❌ New tunnel edge failed its health check; keeping the previous edge route." >&2
+  exit 1
+fi
+
 echo "✅ Tunnel server is running."
 
-# 2. Update Caddyfile (Web will be handled by Vercel)
+if [ "$UPTIME_ENABLED" = "true" ]; then
+  if ! curl --fail --silent --max-time 5 -H 'Host: status.outray.app' "http://127.0.0.1:$STATUS_PORT/health" >/dev/null; then
+    echo "❌ Status renderer is not healthy; keeping the previous edge route." >&2
+    exit 1
+  fi
+fi
+
+# 2. Update Caddyfile (console deployment is owned by the private platform)
 echo "🔄 Updating Caddyfile..."
 
-cat > $CADDYFILE <<EOF
+if [ ! -r /etc/caddy/cloudflare.env ]; then
+  echo "❌ /etc/caddy/cloudflare.env is required for wildcard certificate renewal." >&2
+  exit 1
+fi
+
+set -a
+. /etc/caddy/cloudflare.env
+set +a
+
+CADDYFILE_CANDIDATE="${CADDYFILE}.next"
+cat > "$CADDYFILE_CANDIDATE" <<EOF
 {
     on_demand_tls {
-        ask http://localhost:3001/internal/domain-check
+        ask http://127.0.0.1:3001/internal/domain-check
+    }
+}
+
+*.${BASE_DOMAIN} {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+
+    reverse_proxy 127.0.0.1:$TARGET_PORT {
+        header_up Host {hostport}
+        header_up -X-Outray-Edge-Secret
+        header_up X-Outray-Client-IP {remote_host}
+    }
+}
+
+status.outray.app, *.status.outray.app {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+
+    reverse_proxy 127.0.0.1:$TARGET_PORT {
+        header_up Host {hostport}
+        header_up -X-Outray-Edge-Secret
+        header_up X-Outray-Client-IP {remote_host}
     }
 }
 
@@ -144,9 +179,17 @@ cat > $CADDYFILE <<EOF
         on_demand
     }
 
-    reverse_proxy localhost:$TARGET_PORT
+    reverse_proxy 127.0.0.1:$TARGET_PORT {
+        header_up Host {hostport}
+        header_up -X-Outray-Edge-Secret
+        header_up X-Outray-Client-IP {remote_host}
+    }
 }
 EOF
+
+caddy fmt --overwrite "$CADDYFILE_CANDIDATE"
+caddy validate --config "$CADDYFILE_CANDIDATE"
+mv "$CADDYFILE_CANDIDATE" "$CADDYFILE"
 
 # 3. Reload Caddy
 echo "🔄 Reloading Caddy..."
@@ -160,15 +203,6 @@ if pm2 describe "$OLD_NAME" >/dev/null 2>&1; then
   pm2 stop "$OLD_NAME" || true
   pm2 delete "$OLD_NAME" || true
 fi
-
-# Clean up any legacy web servers
-for web_name in "outray-web-blue" "outray-web-green"; do
-  if pm2 describe "$web_name" >/dev/null 2>&1; then
-    echo "🧹 Cleaning up legacy web server: $web_name..."
-    pm2 stop "$web_name" || true
-    pm2 delete "$web_name" || true
-  fi
-done
 
 # Save PM2 list
 pm2 save
