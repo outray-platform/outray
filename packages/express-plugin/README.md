@@ -1,6 +1,6 @@
 # @outray/express
 
-Express middleware to automatically expose your development server to the internet via [Outray](https://outray.dev) tunnel.
+Express middleware to automatically expose your development server to the internet via [Outray](https://outray.co) tunnel.
 
 ## Installation
 
@@ -13,21 +13,21 @@ npm install @outray/express
 ### Basic Usage
 
 ```typescript
-import express from 'express'
-import outray from '@outray/express'
+import express from "express";
+import outray from "@outray/express";
 
-const app = express()
+const app = express();
 
 // Apply Outray middleware
-outray(app)
+outray(app);
 
-app.get('/', (req, res) => {
-  res.send('Hello World!')
-})
+app.get("/", (req, res) => {
+  res.send("Hello World!");
+});
 
 app.listen(3000, () => {
-  console.log('Server running on port 3000')
-})
+  console.log("Server running on port 3000");
+});
 ```
 
 When you start your server in development mode, you'll see:
@@ -40,21 +40,93 @@ Server running on port 3000
 ### With Options
 
 ```typescript
-import express from 'express'
-import outray from '@outray/express'
+import express from "express";
+import outray from "@outray/express";
 
-const app = express()
+const app = express();
 
 outray(app, {
-  subdomain: 'my-app',
+  subdomain: "my-app",
   apiKey: process.env.OUTRAY_API_KEY,
   onTunnelReady: (url) => {
-    console.log('Tunnel ready at:', url)
-  }
-})
+    console.log("Tunnel ready at:", url);
+  },
+});
 
-app.listen(3000)
+app.listen(3000);
 ```
+
+### Observability
+
+Register telemetry in code before your routes. No `NODE_OPTIONS` preloader or
+OpenTelemetry environment-variable names are required:
+
+```typescript
+import express from "express";
+import outray, { registerOutrayObservability } from "@outray/express";
+
+const app = express();
+
+const telemetry = registerOutrayObservability(app, {
+  apiKey: "outray_your_observability_token",
+  serviceName: "orders-api",
+  environment: "production",
+  captureConsole: true,
+  capturePayloads: {
+    maxBodyBytes: 16 * 1024,
+    redactedHeaders: ["x-workspace-secret"],
+    redactedFields: ["accountPin"],
+  },
+  shouldCapturePayloads: ({ pathname }) => !pathname.startsWith("/secrets/"),
+});
+
+telemetry.info("orders API started");
+
+app.use(express.json());
+app.post("/orders", createOrder);
+
+// Optional development tunnel; telemetry is independent from it.
+outray(app);
+```
+
+Pass the token directly as shown, but do not commit a real token to source
+control. Production code can supply the same `apiKey` option from any
+server-only secret provider. Request spans, logs, and metrics are initialized
+by the adapter. Payload capture is optional and request streams are never
+consumed; parsed bodies become available after a body parser such as
+`express.json()` populates `request.body`.
+
+Every instrumented request records `http.server.request.count`,
+`http.server.request.duration`, and `http.server.active_requests`. The returned
+object exposes `debug`, `info`, `warn`, and `error`. Use `withOutraySpan` from
+`@outray/express` for application operations that need a child span inside the
+current request trace.
+
+`captureConsole: true` also sends existing `console.debug`, `console.info`,
+`console.log`, `console.warn`, and `console.error` calls while preserving their
+normal local output.
+
+Only JSON, `application/*+json`, and URL-encoded form bodies are eligible.
+Authorization, cookies, tokens, passwords, secrets, and API/private keys are
+redacted. Bodies default to 16 KiB (hard limit 64 KiB) and serialized headers
+default to 8 KiB (hard limit 32 KiB). Multipart, text, XML, binary, compressed,
+and streaming bodies are not captured.
+
+### Keep sensitive endpoints metadata-only
+
+`shouldCapturePayloads` uses the shared `HttpPayloadCapturePolicy<NodeHttpPayloadCaptureContext>`
+policy from `@outray/core`. Its context contains the Node `request`, `response`,
+`pathname`, and HTTP `method`. Only `true` permits the configured payload capture;
+`false` or a thrown error skips **all request and response headers and bodies**.
+The policy is evaluated once per request, without consuming request streams.
+Request spans, status, duration, and metrics remain active.
+
+Set the callback on `registerOutrayObservability` or on the top-level `outray`
+options. When `observability` is nested inside `outray`, a top-level callback
+overrides the nested callback, just as top-level `capturePayloads` overrides its
+nested setting. Capture still requires `capturePayloads` to be enabled, and works
+when the development tunnel is disabled. This policy controls payload capture
+only; use request route/filter options and logging policy separately when needed.
 
 ## Options
 
@@ -62,31 +134,37 @@ app.listen(3000)
 interface OutrayPluginOptions {
   /** Subdomain to use (requires authentication) */
   subdomain?: string;
-  
+
   /** Custom domain (must be configured in dashboard) */
   customDomain?: string;
-  
+
   /** API key for authentication */
   apiKey?: string;
-  
+
   /** Outray server URL */
   serverUrl?: string;
-  
+
   /** Enable/disable tunnel (default: true in development) */
   enabled?: boolean;
-  
+
   /** Suppress logs */
   silent?: boolean;
-  
+
+  /** Opt-in OpenTelemetry payload capture (default: false) */
+  capturePayloads?: boolean | HttpPayloadCaptureOptions;
+
+  /** Per-request payload gate; metadata tracing remains active */
+  shouldCapturePayloads?: (context: NodeHttpPayloadCaptureContext) => boolean;
+
   /** Callback when tunnel is ready */
   onTunnelReady?: (url: string) => void;
-  
+
   /** Callback on error */
   onError?: (error: Error) => void;
-  
+
   /** Callback on reconnecting */
   onReconnecting?: () => void;
-  
+
   /** Callback on close */
   onClose?: () => void;
 }
@@ -97,4 +175,4 @@ interface OutrayPluginOptions {
 - `OUTRAY_API_KEY` - Your Outray API key
 - `OUTRAY_SUBDOMAIN` - Custom subdomain
 - `OUTRAY_ENABLED` - Set to `"false"` to disable
-- `OUTRAY_SERVER_URL` - Custom server URL (default: `wss://api.outray.dev/`)
+- `OUTRAY_SERVER_URL` - Custom server URL (default: `wss://connect.outray.co/`)
