@@ -3,7 +3,7 @@ name: Release CLI
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
@@ -16,19 +16,19 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: "22"
 
       - name: Install dependencies
-        working-directory: apps/cli
         run: npm ci
 
-      - name: Build TypeScript
-        working-directory: apps/cli
-        run: npm run build
+      - name: Build CLI and workspace dependencies
+        run: npm run build -- --filter=outray
+
+      - name: Test CLI Secrets and tunnel compatibility
+        run: npm test --workspace=outray
 
       - name: Build binaries
-        working-directory: apps/cli
-        run: npx pkg . --compress GZip
+        run: npm run build:binaries --workspace=outray
 
       - name: Prepare release assets
         working-directory: apps/cli/bin
@@ -59,22 +59,20 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '18'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
 
       - name: Install dependencies
-        working-directory: apps/cli
         run: npm ci
 
       - name: Build
-        working-directory: apps/cli
-        run: npm run build
+        run: npm run build -- --filter=outray
 
       - name: Publish to npm
         working-directory: apps/cli
         run: npm publish --access public
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPMJS_TOKEN }}
 
   update-homebrew:
     needs: build
@@ -84,7 +82,7 @@ jobs:
         uses: peter-evans/repository-dispatch@v2
         with:
           token: ${{ secrets.TAP_GITHUB_TOKEN }}
-          repository: outray-tunnel/homebrew-tap
+          repository: outray-platform/homebrew-tap
           event-type: update-formula
           client-payload: '{"version": "${{ github.ref_name }}"}'
 
@@ -96,6 +94,6 @@ jobs:
         uses: peter-evans/repository-dispatch@v2
         with:
           token: ${{ secrets.TAP_GITHUB_TOKEN }}
-          repository: outray-tunnel/scoop-bucket
+          repository: outray-platform/scoop-bucket
           event-type: update-manifest
           client-payload: '{"version": "${{ github.ref_name }}"}'
