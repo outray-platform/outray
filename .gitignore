@@ -1,11 +1,22 @@
 node_modules/
+.self-hosted-artifacts/
+.self-hosted-state/
+packages/icons/generated/
 dist/
+.turbo/
 *.log
 .DS_Store
 .env
 .env.local
+.env.prod
+.env.self-hosted
+.env.ops
+.tinyb
 .output
 .vscode
+.wrangler/
+.dev.vars*
+dist-worker/
 
 # Local database files
 data/
@@ -14,7 +25,6 @@ format_schemas/
 metadata/
 metadata_dropped/
 preprocessed_configs/
-status
 store/
 tmp/
 user_files/
@@ -26,4 +36,3 @@ test-apps
 video
 pnpm-lock.yaml
 md
-.turbo
