@@ -1,72 +1,28 @@
-<a href="https://vercel.com/oss">
-  <img alt="Vercel OSS Program" src="https://vercel.com/oss/program-badge.svg" />
-</a>
+# OutRay open-source tools
 
-# OutRay
+MIT-licensed tunnel edge, CLI, SDKs and client integrations for OutRay.
 
-**Expose your localhost to the internet.** Outray is an open-source tunneling solution that lets you share local servers with anyone, anywhere.
+- `apps/tunnel`: HTTP, TCP, UDP and WebSocket tunnel edge, including optional platform integration adapters.
+- `apps/cli`: the `outray` command, including tunnel and Secrets client commands.
+- `packages`: `@outray/core`, `@outray/observability`, Express, Hono, NestJS, Next.js, TanStack Start and Vite integrations, plus shared server primitives.
+- `plugins/outray`: the public MCP client plugin; the MCP server is not part of this repository.
 
+The hosted console and product backends live in the private [platform repository](https://github.com/outray-platform/platform/tree/next). Full-platform self-hosting requires authorized private access. The edge alone is not a complete control plane: it requires Redis and a compatible authenticated control-plane API. Authentication is not bypassed when running locally.
 
-## Features
+## Development
 
-- **HTTP Tunnels** - Expose web servers with custom subdomains
-- **TCP Tunnels** - Tunnel any TCP service (databases, game servers, etc.)
-- **UDP Tunnels** - Tunnel UDP traffic (DNS, VoIP, TFTP, etc.)
-- **Custom Domains** - Bring your own domain with automatic TLS
-- **Dashboard** - Monitor traffic, view analytics, manage tunnels
-- **Team Support** - Collaborate with organizations and role-based access
+Use Node.js >=22.19.0 and npm >=10. Install and build:
 
-## Quick Start
-
-### Install the CLI
-
-```bash
-npm install -g outray
+```sh
+npm ci
+npm run build
+npm test
 ```
 
-### Create a tunnel
+Copy `.env.example` to `.env` and configure a compatible control plane before `npm run dev:tunnel`. No private source checkout or icon license is needed to build these tools. Standard hosted SDK and CLI defaults remain unchanged; use the installation's configured base URL for self-hosted instances.
 
-```bash
-# HTTP tunnel
-outray http 3000
+## Releases
 
-# TCP tunnel (e.g., for PostgreSQL)
-outray tcp 5432
+`npm run packages:publish -- --all --dry-run` previews changed-package releases. Publishing uses `NPMJS_TOKEN`; never commit tokens or production environment files. CLI tag releases retain their existing binaries and installer formats. The independently built edge image is published as `ghcr.io/outray-platform/outray-edge` and should be pinned by digest in consumers.
 
-# UDP tunnel
-outray udp 53
-```
-
-### Requirements
-
-- Node.js 20+
-- PostgreSQL
-- Redis
-- Tiger Data (TimescaleDB)
-
-### Project Structure
-
-```
-outray/
-├── apps/
-│   ├── cli/             # CLI client
-│   ├── cron/            # Background jobs
-│   ├── internal-check/  # Domain verification for Caddy
-│   ├── landing/         # Marketing website
-│   ├── tunnel/          # Tunnel server
-│   └── web/             # Dashboard & API
-├── shared/              # Shared utilities
-└── deploy/              # Deployment configs
-```
-
-## Documentation
-
-Visit [outray.dev/docs](https://outray.dev/docs) for full documentation.
-
-## Contributing
-
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## License
-
-AGPL-3.0-only
+See [CONTRIBUTING.md](CONTRIBUTING.md). Source in the current working tree is MIT-licensed; third-party notices and historical release licenses remain applicable to their respective code and versions.
