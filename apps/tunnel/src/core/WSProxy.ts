@@ -17,7 +17,7 @@ interface PendingUpgrade {
  * Handles end-user WebSocket connections through HTTP tunnels.
  *
  * When an end-user connects via WebSocket to a tunneled subdomain
- * (e.g., ws://myapp.outray.dev/socket), this proxy:
+ * (e.g., ws://myapp.outray.app/socket), this proxy:
  *
  * 1. Sends a ws_upgrade message to the tunnel client via the control WebSocket
  * 2. Waits for the client to open a local WebSocket and confirm with ws_upgrade_response
