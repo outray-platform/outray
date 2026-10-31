@@ -1,0 +1,29 @@
+when:
+  - event: [push, manual]
+    branch: main
+concurrency: 1
+steps:
+  - name: install
+    image: node:22-bookworm
+    commands:
+      - npm ci --no-audit --no-fund
+  - name: build
+    image: node:22-bookworm
+    commands:
+      - npm run build -- --concurrency=1
+  - name: test
+    image: node:22-bookworm
+    commands:
+      - npm test
+  # Publishing an edge image is separate from promoting the hosted edge.
+  # Manual production promotion never deploys private services or migrations.
+  - name: deploy-edge
+    image: node:22-bookworm
+    when:
+      - event: manual
+    environment:
+      EDGE_SSH_KEY:
+        from_secret: edge_ssh_key
+    commands:
+      - apt-get update -qq && apt-get install -y -qq openssh-client
+      - bash deploy/woodpecker/deploy-edge.sh
