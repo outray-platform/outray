@@ -1,6 +1,6 @@
 # @outray/core
 
-Core tunnel client for [Outray](https://outray.dev) - shared between the CLI and framework plugins.
+Core tunnel client for [Outray](https://outray.co) - shared between the CLI and framework plugins.
 
 This package provides the low-level WebSocket client for establishing tunnels to the Outray server. It's used internally by:
 
@@ -70,7 +70,7 @@ client.stop();
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `localPort` | `number` | **required** | Local port to proxy requests to |
-| `serverUrl` | `string` | `'wss://api.outray.dev/'` | Outray server WebSocket URL |
+| `serverUrl` | `string` | `'wss://connect.outray.co/'` | Outray server WebSocket URL |
 | `apiKey` | `string` | - | API key for authentication |
 | `subdomain` | `string` | - | Subdomain to use (requires auth) |
 | `customDomain` | `string` | - | Custom domain (must be configured in dashboard) |
@@ -115,6 +115,33 @@ ErrorCodes.LIMIT_EXCEEDED
 ErrorCodes.INVALID_SUBDOMAIN
 ErrorCodes.CUSTOM_DOMAIN_NOT_CONFIGURED
 ```
+
+### HTTP payload capture contract
+
+Framework plugins use the opt-in payload capture helpers in this package to add
+bounded values to the active OpenTelemetry server span. Bodies and headers are
+serialized as strings because OpenTelemetry attributes cannot contain objects.
+
+`HttpPayloadCaptureOptions.redactedFields` adds application-owned field names to
+the default credential policy. `redactedRequestFields` adds fields only for
+request JSON/form bodies (for example `code`, `state`, `nonce`, `challenge`), so
+login inputs can be hidden while response error codes stay readable. These
+options are shared by Node HTTP and Fetch adapters. Credential URLs and inline
+credential assignments in captured strings are sanitized as well.
+
+| Attribute | Type |
+|---|---|
+| `outray.http.capture.version` | string (`"1"`) |
+| `outray.http.request.headers` / `outray.http.response.headers` | JSON object string |
+| `outray.http.request.headers.truncated` / `outray.http.response.headers.truncated` | boolean |
+| `outray.http.request.body` / `outray.http.response.body` | redacted string |
+| `outray.http.request.body.size` / `outray.http.response.body.size` | number |
+| `outray.http.request.body.truncated` / `outray.http.response.body.truncated` | boolean |
+| `outray.http.request.body.content_type` / `outray.http.response.body.content_type` | lowercase MIME string |
+
+An absent attribute means the value was unavailable, unsupported, or not opted
+in. Consumers must still treat all telemetry as untrusted and re-sanitize these
+values at ingestion.
 
 ## Building Framework Plugins
 
