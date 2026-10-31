@@ -1,6 +1,6 @@
 {
   "name": "@outray/core",
-  "version": "0.0.4",
+  "version": "0.0.8",
   "description": "Core tunnel client for Outray - shared between CLI and framework plugins",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -18,6 +18,7 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
+    "test": "tsx --test test/*.test.ts",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -29,11 +30,13 @@
     "websocket"
   ],
   "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
+    "tsx": "^4.20.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0"
   },
@@ -41,12 +44,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/akinloluwami/outray.git",
+    "url": "https://github.com/outray-platform/outray.git",
     "directory": "packages/core"
   },
-  "homepage": "https://outray.dev",
+  "homepage": "https://outray.co",
   "bugs": {
-    "url": "https://github.com/akinloluwami/outray/issues"
+    "url": "https://github.com/outray-platform/outray/issues"
   },
   "engines": {
     "node": ">=16.0.0"
