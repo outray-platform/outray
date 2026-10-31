@@ -1,13 +1,45 @@
-# OutRay open-source tools
+# OutRay
 
-MIT-licensed tunnel edge, CLI, SDKs and client integrations for OutRay.
+Share your local server with a secure public URL. Test webhooks, preview your work, and connect to local services without opening ports on your router.
 
-- `apps/tunnel`: HTTP, TCP, UDP and WebSocket tunnel edge, including optional platform integration adapters.
-- `apps/cli`: the `outray` command, including tunnel and Secrets client commands.
-- `packages`: `@outray/core`, `@outray/observability`, Express, Hono, NestJS, Next.js, TanStack Start and Vite integrations, plus shared server primitives.
-- `plugins/outray`: the public MCP client plugin; the MCP server is not part of this repository.
+[Website](https://outray.co) · [Documentation](https://outray.co/docs)
 
-The hosted console and product backends live in the private [platform repository](https://github.com/outray-platform/platform/tree/next). The edge alone is not a complete control plane: it requires Redis and a compatible authenticated control-plane API. Authentication is not bypassed when running locally.
+## Get started
+
+Install the CLI, sign in, and expose your local app:
+
+```sh
+npm install -g outray
+outray login
+outray 3000
+```
+
+OutRay gives you a public HTTPS address that forwards requests to `localhost:3000`. WebSocket connections are supported too.
+
+For TCP and UDP services:
+
+```sh
+outray tcp 5432
+outray udp 25565
+```
+
+## SDKs and integrations
+
+Bring OutRay into your application or development workflow:
+
+- [Core](packages/core/README.md) — programmatic tunnel client and shared HTTP capture utilities.
+- [Observability](packages/observability/README.md) — Node.js traces, logs and metrics, built on OpenTelemetry.
+- [Express](packages/express-plugin/README.md), [Hono](packages/hono/README.md), [NestJS](packages/nestjs-plugin/README.md), [Next.js](packages/next-plugin/README.md) and [TanStack Start](packages/tanstack-start/README.md) — framework integrations.
+- [Vite](packages/vite-plugin) — integrate tunneling into your dev server.
+
+The CLI also includes Secrets commands. See `outray secrets --help` for available workflows.
+
+## Repository
+
+- `apps/cli` — the `outray` command.
+- `apps/tunnel` — the HTTP, TCP, UDP and WebSocket tunnel edge.
+- `packages` — SDKs, framework integrations and shared runtime utilities.
+- [`plugins/outray`](plugins/outray/README.md) — the OutRay MCP client plugin.
 
 ## Development
 
@@ -19,10 +51,10 @@ npm run build
 npm test
 ```
 
-Copy `.env.example` to `.env` and configure a compatible control plane before `npm run dev:tunnel`. No private source checkout or icon license is needed to build these tools. Standard hosted SDK and CLI defaults remain unchanged; integrations can explicitly configure a different base URL.
+To develop the tunnel edge locally, copy `.env.example` to `.env` and configure Redis and an authenticated control-plane API before running `npm run dev:tunnel`.
 
-## Releases
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 
-`npm run packages:publish -- --all --dry-run` previews changed-package releases. Publishing uses `NPMJS_TOKEN`; never commit tokens or production environment files. CLI tag releases retain their existing binaries and installer formats. The independently built edge image is published as `ghcr.io/outray-platform/outray-edge` and should be pinned by digest in consumers.
+## License
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Source in the current working tree is MIT-licensed; third-party notices and historical release licenses remain applicable to their respective code and versions.
+MIT. Third-party notices and historical release licenses remain applicable to their respective code and versions.
