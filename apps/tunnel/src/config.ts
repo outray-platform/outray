@@ -1,7 +1,8 @@
 import "dotenv/config";
 
 export const config = {
-  port: parseInt(process.env.PORT || "3547", 10),
+  port: parseInt(process.env.TUNNEL_PORT || process.env.PORT || "3547", 10),
+  bindHost: process.env.TUNNEL_BIND_HOST || "0.0.0.0",
   baseDomain: process.env.BASE_DOMAIN || "localhost.direct",
   redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
   redisTunnelTtlSeconds: parseInt(
@@ -13,8 +14,8 @@ export const config = {
     10,
   ),
   requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || "60000", 10),
-  timeScaleUrl:
-    process.env.TIMESCALE_URL || "postgresql://localhost:5432/outray",
+  tinybirdApiHost: (process.env.TINYBIRD_API_HOST || "").replace(/\/$/, ""),
+  tinybirdIngestToken: process.env.TINYBIRD_TUNNEL_INGEST_TOKEN || process.env.TINYBIRD_INGEST_TOKEN || "",
   // TCP/UDP port ranges
   tcpPortRangeMin: parseInt(process.env.TCP_PORT_RANGE_MIN || "20000", 10),
   tcpPortRangeMax: parseInt(process.env.TCP_PORT_RANGE_MAX || "30000", 10),
