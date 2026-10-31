@@ -24,6 +24,13 @@ export interface GlobalConfig {
 
 export interface OutRayTomlConfig {
   global?: GlobalConfig;
+  secrets?: {
+    org?: string;
+    vault?: string;
+    /** @deprecated Use vault. Retained for existing config files. */
+    project?: string;
+    environment?: string;
+  };
   tunnel?: Record<string, TunnelConfig>;
 }
 
@@ -101,19 +108,22 @@ const tunnelConfigSchema = Joi.object({
 
 const configSchema = Joi.object({
   global: globalConfigSchema.optional(),
+  secrets: Joi.object({
+    org: Joi.string().optional(),
+    vault: Joi.string().optional(),
+    project: Joi.string().optional(),
+    environment: Joi.string().optional(),
+  }).optional(),
   tunnel: Joi.object()
     .pattern(Joi.string(), tunnelConfigSchema)
-    .min(1)
-    .required()
-    .messages({
-      "object.min": "No tunnels defined in config file",
-    }),
+    .optional(),
 });
 
 export class TomlConfigParser {
   static loadTomlConfig(configPath: string): {
     tunnels: ParsedTunnelConfig[];
     global?: GlobalConfig;
+    secrets?: OutRayTomlConfig["secrets"];
   } {
     const fullPath = path.resolve(configPath);
 
@@ -198,7 +208,7 @@ export class TomlConfigParser {
     const tunnels: ParsedTunnelConfig[] = [];
     const globalConfig = config.global;
 
-    for (const [name, tunnelConfig] of Object.entries(config.tunnel)) {
+    for (const [name, tunnelConfig] of Object.entries(config.tunnel ?? {})) {
       const tunnel = tunnelConfig as TunnelConfig;
       tunnels.push({
         name,
@@ -214,6 +224,6 @@ export class TomlConfigParser {
       });
     }
 
-    return { tunnels, global: globalConfig };
+    return { tunnels, global: globalConfig, secrets: config.secrets };
   }
 }
