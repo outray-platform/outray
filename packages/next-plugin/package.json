@@ -1,7 +1,7 @@
 {
   "name": "@outray/next",
-  "version": "0.0.4",
-  "description": "Next.js plugin to automatically expose your dev server via Outray tunnel",
+  "version": "0.0.9",
+  "description": "Next.js tunnels and OpenTelemetry observability for OutRay",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
@@ -10,6 +10,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
       "require": "./dist/index.js"
+    },
+    "./observability": {
+      "types": "./dist/observability.d.ts",
+      "import": "./dist/observability.mjs",
+      "require": "./dist/observability.js"
     }
   },
   "files": [
@@ -18,7 +23,8 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "prepublishOnly": "npm run build"
+    "test": "tsx --test test/*.test.ts",
+    "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [
     "next",
@@ -28,17 +34,27 @@
     "outray",
     "ngrok",
     "localhost",
-    "development"
+    "development",
+    "observability",
+    "opentelemetry",
+    "tracing",
+    "metrics"
   ],
   "peerDependencies": {
     "next": "^13.0.0 || ^14.0.0 || ^15.0.0 || ^16.0.0"
   },
   "dependencies": {
-    "@outray/core": "^0.0.2"
+    "@opentelemetry/api": "^1.9.0",
+    "@outray/core": "^0.0.7",
+    "@outray/observability": "^0.1.5"
   },
   "devDependencies": {
+    "@opentelemetry/context-async-hooks": "^2.11.0",
+    "@opentelemetry/sdk-metrics": "^2.11.0",
+    "@opentelemetry/sdk-trace-base": "^2.11.0",
     "@types/node": "^22.0.0",
-    "next": "^16.0.0",
+    "next": "^16.3.8",
+    "tsx": "^4.20.0",
     "tsup": "^8.0.0",
     "typescript": "^5.9.3"
   },
@@ -46,8 +62,8 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/akinloluwami/outray.git",
+    "url": "https://github.com/outray-platform/outray.git",
     "directory": "packages/next-plugin"
   },
-  "homepage": "https://outray.dev/nextjs"
+  "homepage": "https://outray.co/docs/nextjs-plugin"
 }
