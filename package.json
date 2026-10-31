@@ -1,23 +1,41 @@
 {
-  "name": "outray",
+  "name": "@outray/monorepo",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
+  "packageManager": "npm@10.9.2",
+  "engines": {
+    "node": ">=22.19.0",
+    "npm": ">=10.0.0"
+  },
   "workspaces": [
-    "apps/tunnel",
-    "apps/cli",
-    "apps/web"
+    "apps/*",
+    "packages/*"
   ],
+  "overrides": {
+    "proxy-addr": "2.0.8",
+    "seroval": "1.6.11",
+    "unifont": "0.7.5"
+  },
   "scripts": {
-    "install:all": "npm install && cd apps/tunnel && npm install && cd ../cli && npm install && cd ../web && npm install",
-    "dev:tunnel": "cd apps/tunnel && npm run dev",
-    "dev:web": "cd apps/web && npm run dev",
-    "build": "cd apps/tunnel && npm run build && cd ../cli && npm run build && cd ../web && npm run build"
+    "dev": "dotenv -e .env -- turbo run dev --env-mode=loose",
+    "dev:tunnel": "dotenv -e .env -- turbo run dev --env-mode=loose --filter=outray-tunnel",
+    "dev:cli": "npm run dev --workspace=outray",
+    "build": "turbo run build",
+    "test": "node --test scripts/*.test.mjs && turbo run test --concurrency=1",
+    "lint": "turbo run lint",
+    "packages:publish": "node scripts/publish-packages.mjs",
+    "packages:publish:dry-run": "node scripts/publish-packages.mjs --dry-run",
+    "packages:publish:test": "node --test scripts/publish-packages.test.mjs",
+    "plugin:check": "node scripts/outray-plugin.mjs",
+    "plugin:package": "node scripts/outray-plugin.mjs --package",
+    "plugin:prepare:native": "node scripts/prepare-outray-native-plugin.mjs",
+    "plugin:check:live": "node scripts/check-outray-mcp-live.mjs"
   },
   "devDependencies": {
-    "typescript": "^5.7.2"
-  },
-  "dependencies": {
-    "axios": "^1.13.2",
-    "zustand": "^5.0.9"
+    "dotenv-cli": "^10.0.0",
+    "semver": "^7.7.3",
+    "turbo": "^2.5.6",
+    "yaml": "2.9.1"
   }
 }
