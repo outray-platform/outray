@@ -1,7 +1,29 @@
+import type {
+  HttpPayloadCapturePolicy,
+  HttpPayloadCaptureSetting,
+  NodeHttpPayloadCaptureContext,
+} from "@outray/core";
+import type {
+  OutrayNodeHttpMiddlewareOptions,
+  OutrayObservabilityOptions,
+} from "@outray/observability";
+
+export interface OutrayExpressObservabilityOptions
+  extends OutrayObservabilityOptions,
+    HttpPayloadCapturePolicy<NodeHttpPayloadCaptureContext> {
+  /** Opt in to bounded and redacted request/response capture. */
+  capturePayloads?: HttpPayloadCaptureSetting;
+  /** Customize request filtering and low-cardinality route names. */
+  request?: OutrayNodeHttpMiddlewareOptions;
+}
+
 /**
  * Configuration options for the Outray Express middleware
  */
-export interface OutrayPluginOptions {
+export interface OutrayPluginOptions
+  extends HttpPayloadCapturePolicy<NodeHttpPayloadCaptureContext> {
+  /** Start request tracing, logs, and metrics using in-code configuration. */
+  observability?: OutrayExpressObservabilityOptions;
   /**
    * Subdomain to use for the tunnel URL
    * Requires authentication
@@ -23,7 +45,7 @@ export interface OutrayPluginOptions {
 
   /**
    * Outray server WebSocket URL
-   * @default 'wss://api.outray.dev/'
+   * @default 'wss://connect.outray.co/'
    */
   serverUrl?: string;
 
@@ -46,6 +68,14 @@ export interface OutrayPluginOptions {
    * @default false
    */
   local?: boolean;
+
+  /**
+   * Opt in to adding redacted, bounded request/response payload attributes to
+   * the active OpenTelemetry server span. This remains independent of `enabled`
+   * so it can be used when tunnels are disabled in production.
+   * @default false
+   */
+  capturePayloads?: HttpPayloadCaptureSetting;
 
   /**
    * Callback fired when tunnel is successfully established
