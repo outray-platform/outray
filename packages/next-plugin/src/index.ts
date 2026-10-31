@@ -1,8 +1,47 @@
 import type { NextConfig } from "next";
-import { OutrayClient, LocalAccessManager } from "@outray/core";
-import type { OutrayPluginOptions } from "./types";
+import { SpanKind, SpanStatusCode, trace, type Span } from "@opentelemetry/api";
+import {
+  OutrayClient,
+  LocalAccessManager,
+  captureFetchRequest,
+  captureFetchResponse,
+  isHttpPayloadCaptureActive,
+  resolveHttpPayloadCapture,
+} from "@outray/core";
+import {
+  createOutrayHttpServerMetrics,
+  getOutrayTracer,
+} from "@outray/observability";
+import type {
+  OutrayNextRequestContext,
+  OutrayNextRequestOptions,
+  OutrayPayloadCaptureOptions,
+  OutrayPluginOptions,
+} from "./types";
+import packageMetadata from "../package.json" with { type: "json" };
+export { withOutraySpan } from "@outray/observability";
 
-const DEFAULT_SERVER_URL = "wss://api.outray.dev/";
+const DEFAULT_SERVER_URL = "wss://connect.outray.co/";
+const OUTRAY_NEXT_VERSION = packageMetadata.version;
+let nextRequestMetrics:
+  | ReturnType<typeof createOutrayHttpServerMetrics>
+  | undefined;
+
+const UUID_SEGMENT =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const INTEGER_SEGMENT = /^\d+$/;
+const LONG_HEX_SEGMENT = /^[0-9a-f]{16,}$/i;
+const ULID_SEGMENT = /^[0-9A-HJKMNP-TV-Z]{26}$/i;
+const DEFAULT_IGNORED_PREFIXES = ["/_next/", "/assets/"] as const;
+
+function getNextRequestMetrics() {
+  nextRequestMetrics ??= createOutrayHttpServerMetrics({
+    framework: "nextjs",
+    instrumentationName: "@outray/next",
+    instrumentationVersion: OUTRAY_NEXT_VERSION,
+  });
+  return nextRequestMetrics;
+}
 
 let client: OutrayClient | null = null;
 let localAccess: LocalAccessManager | null = null;
@@ -169,6 +208,268 @@ function startTunnel(
   process.on("exit", cleanup);
 }
 
+function pathnameFrom(request: Request): string {
+  try {
+    return new URL(request.url).pathname;
+  } catch {
+    return "/";
+  }
+}
+
+/** Convert common identifier segments to `:id` for bounded route cardinality. */
+export function normalizeNextRoute(pathname: string): string {
+  const normalized = pathname
+    .split("/")
+    .map((segment) =>
+      UUID_SEGMENT.test(segment) ||
+      INTEGER_SEGMENT.test(segment) ||
+      LONG_HEX_SEGMENT.test(segment) ||
+      ULID_SEGMENT.test(segment)
+        ? ":id"
+        : segment,
+    )
+    .join("/");
+  const route = normalized.startsWith("/") ? normalized : `/${normalized}`;
+  return (route || "/").slice(0, 256);
+}
+
+function isDefaultIgnoredNextPath(pathname: string): boolean {
+  return (
+    pathname === "/favicon.ico" ||
+    pathname === "/robots.txt" ||
+    DEFAULT_IGNORED_PREFIXES.some((prefix) => pathname.startsWith(prefix))
+  );
+}
+
+function configureNextSpan(
+  span: Span,
+  request: Request,
+  pathname: string,
+  route: string,
+): void {
+  const method = request.method.toUpperCase();
+  span.updateName(`${method} ${route}`);
+  span.setAttributes({
+    "http.request.method": method,
+    "http.route": route,
+    "url.path": pathname,
+    "outray.framework": "nextjs",
+  });
+}
+
+async function runNextHandler<
+  Arguments extends unknown[],
+  Result extends Response,
+>(
+  handler: (request: Request, ...args: Arguments) => Result | Promise<Result>,
+  request: Request,
+  args: Arguments,
+  options: OutrayNextRequestOptions,
+  span: Span,
+  pathname: string,
+  route: string,
+): Promise<Result> {
+  configureNextSpan(span, request, pathname, route);
+
+  let requestClone: Request | undefined;
+  if (
+    options.capturePayloads &&
+    isHttpPayloadCaptureActive(options.capturePayloads)
+  ) {
+    try {
+      requestClone = request.clone();
+    } catch {
+      // A previously-consumed request cannot be cloned; the handler still runs.
+    }
+  }
+
+  let result: Result | Promise<Result>;
+  try {
+    result = handler(request, ...args);
+  } catch (error) {
+    span.setAttribute("http.response.status_code", 500);
+    span.setStatus({ code: SpanStatusCode.ERROR });
+    if (options.recordExceptions !== false && error instanceof Error) {
+      span.recordException(error);
+    }
+    throw error;
+  }
+
+  const requestCapture =
+    requestClone && options.capturePayloads
+      ? captureFetchRequest(requestClone, options.capturePayloads).catch(
+          () => undefined,
+        )
+      : Promise.resolve();
+
+  let response: Result;
+  try {
+    response = await result;
+  } catch (error) {
+    await requestCapture;
+    span.setAttribute("http.response.status_code", 500);
+    span.setStatus({ code: SpanStatusCode.ERROR });
+    if (options.recordExceptions !== false && error instanceof Error) {
+      span.recordException(error);
+    }
+    throw error;
+  }
+
+  await requestCapture;
+  span.setAttribute("http.response.status_code", response.status);
+  if (response.status >= 500) {
+    span.setStatus({ code: SpanStatusCode.ERROR });
+  }
+
+  if (
+    options.capturePayloads &&
+    isHttpPayloadCaptureActive(options.capturePayloads)
+  ) {
+    try {
+      await captureFetchResponse(response.clone(), options.capturePayloads);
+    } catch {
+      // Streaming/framework-specific responses are allowed to be unclonable.
+    }
+  }
+
+  return response;
+}
+
+/**
+ * Instrument an App Router route handler with route-aware traces and HTTP
+ * server metrics. Payload capture remains opt-in.
+ */
+export function withOutrayRequest<
+  Arguments extends unknown[],
+  Result extends Response,
+>(
+  handler: (request: Request, ...args: Arguments) => Result | Promise<Result>,
+  options: OutrayNextRequestOptions = {},
+): (request: Request, ...args: Arguments) => Promise<Result> {
+  return async (request: Request, ...args: Arguments): Promise<Result> => {
+    const pathname = pathnameFrom(request);
+    const requestContext: OutrayNextRequestContext = {
+      request,
+      pathname,
+      method: request.method,
+    };
+    let ignored =
+      options.ignoreDefaultPaths !== false && isDefaultIgnoredNextPath(pathname);
+    try {
+      ignored ||= options.ignore?.(requestContext) === true;
+    } catch {
+      // A telemetry filter cannot block the application request.
+    }
+    if (ignored) return handler(request, ...args);
+
+    const requestOptions = {
+      capturePayloads: resolveHttpPayloadCapture(
+        options.capturePayloads,
+        requestContext,
+        options,
+      ),
+      recordExceptions: options.recordExceptions,
+    };
+
+    let route: string | null | undefined;
+    try {
+      route = options.routeResolver?.(requestContext);
+    } catch {
+      // Fall back to bounded identifier normalization.
+    }
+    route ||= normalizeNextRoute(pathname);
+
+    const finishMetrics = getNextRequestMetrics().start({
+      method: request.method,
+      route,
+    });
+    const execute = async (span: Span): Promise<Result> => {
+      try {
+        const response = await runNextHandler(
+          handler,
+          request,
+          args,
+          requestOptions,
+          span,
+          pathname,
+          route!,
+        );
+        finishMetrics({ statusCode: response.status, route: route! });
+        return response;
+      } catch (error) {
+        finishMetrics({
+          statusCode: 500,
+          errorType:
+            options.recordExceptions === false
+              ? undefined
+              : error instanceof Error ? error.name : "Error",
+          route: route!,
+        });
+        throw error;
+      }
+    };
+
+    const activeSpan = trace.getActiveSpan();
+    if (activeSpan?.isRecording()) return execute(activeSpan);
+
+    return getOutrayTracer("@outray/next", OUTRAY_NEXT_VERSION).startActiveSpan(
+      `${request.method.toUpperCase()} ${route}`,
+      { kind: SpanKind.SERVER },
+      async (span) => {
+        try {
+          return await execute(span);
+        } finally {
+          span.end();
+        }
+      },
+    );
+  };
+}
+
+/**
+ * Opt-in payload capture for App Router route handlers.
+ *
+ * The request and response streams returned to Next.js are never consumed or
+ * replaced. Bounded clones are inspected before the handler completes so the
+ * attributes reach the already-active OpenTelemetry server span.
+ *
+ * @example
+ * ```ts
+ * import { withOutrayPayloadCapture } from '@outray/next'
+ *
+ * export const POST = withOutrayPayloadCapture(async (request) => {
+ *   return Response.json({ ok: true })
+ * })
+ * ```
+ */
+export function withOutrayPayloadCapture<
+  Arguments extends unknown[],
+  Result extends Response,
+>(
+  handler: (request: Request, ...args: Arguments) => Result | Promise<Result>,
+  captureOptions: OutrayPayloadCaptureOptions = true,
+  requestOptions: Omit<OutrayNextRequestOptions, "capturePayloads"> = {},
+): (request: Request, ...args: Arguments) => Promise<Result> {
+  const options: OutrayNextRequestOptions = {
+    capturePayloads: captureOptions,
+    recordExceptions: requestOptions.recordExceptions,
+    routeResolver: requestOptions.routeResolver,
+    ignore: requestOptions.ignore,
+    ignoreDefaultPaths: requestOptions.ignoreDefaultPaths,
+  };
+  // Forward the policy lazily so its getter is read inside core's safety boundary.
+  Object.defineProperty(options, "shouldCapturePayloads", {
+    enumerable: true,
+    get: () => requestOptions.shouldCapturePayloads,
+  });
+  return withOutrayRequest(handler, options);
+}
+
 // Named exports for better tree-shaking
 export { withOutray };
-export type { OutrayPluginOptions };
+export type {
+  OutrayNextRequestContext,
+  OutrayNextRequestOptions,
+  OutrayPayloadCaptureOptions,
+  OutrayPluginOptions,
+};
