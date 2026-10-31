@@ -3,7 +3,7 @@ import WebSocket from "ws";
 import Redis from "ioredis";
 import { Protocol, UDPDataMessage, UDPResponseMessage } from "./Protocol";
 import { generateId, getBandwidthKey } from "../../../../shared/utils";
-import { protocolLogger } from "../lib/timescale";
+import { protocolLogger } from "../lib/tinybird";
 import { PortAllocator } from "./PortAllocator";
 
 interface UDPClient {
@@ -150,6 +150,8 @@ export class UDPProxy {
         rinfo.port,
         msg.length,
         0,
+        undefined,
+        "in",
       );
     }
 
@@ -196,6 +198,8 @@ export class UDPProxy {
               client.port,
               0,
               data.length,
+              undefined,
+              "out",
             );
           }
 
@@ -235,6 +239,8 @@ export class UDPProxy {
         client.port,
         0,
         data.length,
+        undefined,
+        "out",
       );
     }
 
