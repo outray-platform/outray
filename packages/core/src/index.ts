@@ -44,3 +44,23 @@ export type {
 
 // Error codes constant
 export { ErrorCodes } from "./types";
+
+// Safe, opt-in HTTP request/response payload capture for active OpenTelemetry spans
+export {
+  OUTRAY_HTTP_CAPTURE_ATTRIBUTES,
+  captureFetchRequest,
+  captureFetchResponse,
+  createNodeHttpPayloadCaptureMiddleware,
+  isHttpPayloadCaptureActive,
+} from "./http-payload-capture";
+export type {
+  HttpPayloadCaptureOptions,
+  HttpPayloadCaptureSetting,
+  NodeHttpPayloadCaptureMiddleware,
+  NodeHttpPayloadCaptureContext,
+} from "./http-payload-capture";
+export { resolveHttpPayloadCapture } from "./http-payload-capture-policy";
+export type {
+  HttpPayloadCaptureContext,
+  HttpPayloadCapturePolicy,
+} from "./http-payload-capture-policy";
