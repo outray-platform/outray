@@ -1,1 +1,0 @@
-ALTER TABLE "subscriptions" ADD COLUMN "billing_interval" text DEFAULT 'month' NOT NULL;
