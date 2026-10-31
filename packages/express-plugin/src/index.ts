@@ -1,12 +1,61 @@
-import type { Application, Request, Response, NextFunction } from "express";
-import { OutrayClient, LocalAccessManager } from "@outray/core";
-import type { OutrayPluginOptions } from "./types";
+import type { Application } from "express";
+import {
+  OutrayClient,
+  LocalAccessManager,
+  createNodeHttpPayloadCaptureMiddleware,
+} from "@outray/core";
+import {
+  createOutrayNodeHttpMiddleware,
+  startOutrayObservability,
+  type OutrayObservability,
+} from "@outray/observability";
+export { withOutraySpan } from "@outray/observability";
+import type {
+  OutrayExpressObservabilityOptions,
+  OutrayPluginOptions,
+} from "./types";
 import type { Server } from "http";
 
-const DEFAULT_SERVER_URL = "wss://api.outray.dev/";
+const DEFAULT_SERVER_URL = "wss://connect.outray.co/";
 
 let client: OutrayClient | null = null;
 let localAccess: LocalAccessManager | null = null;
+const observabilityRegisteredApps = new WeakMap<
+  Application,
+  OutrayObservability
+>();
+
+/** Register OutRay telemetry before application routes. */
+export function registerOutrayObservability(
+  app: Application,
+  options: OutrayExpressObservabilityOptions,
+): OutrayObservability {
+  const registered = observabilityRegisteredApps.get(app);
+  if (registered) return registered;
+
+  const {
+    capturePayloads,
+    shouldCapturePayloads,
+    request,
+    ...observabilityOptions
+  } = options;
+  const observability = startOutrayObservability(observabilityOptions);
+  app.use(
+    createOutrayNodeHttpMiddleware({
+      ...request,
+      framework: "express",
+    }),
+  );
+  if (capturePayloads !== undefined && capturePayloads !== false) {
+    app.use(
+      createNodeHttpPayloadCaptureMiddleware(capturePayloads, {
+        shouldCapturePayloads,
+      }),
+    );
+  }
+  observabilityRegisteredApps.set(app, observability);
+  return observability;
+}
 
 /**
  * Express middleware that automatically starts an Outray tunnel when the server starts.
@@ -54,7 +103,41 @@ export default function outray(
     enabled = process.env.OUTRAY_ENABLED !== "false",
     silent = false,
     local = false,
+    capturePayloads,
+    shouldCapturePayloads,
   } = options;
+
+  if (options.observability) {
+    registerOutrayObservability(app, {
+      ...options.observability,
+      capturePayloads:
+        options.capturePayloads ?? options.observability.capturePayloads,
+      shouldCapturePayloads:
+        options.shouldCapturePayloads ??
+        options.observability.shouldCapturePayloads,
+    });
+  }
+
+  // Payload capture is explicitly opt-in and independent from the dev-only tunnel.
+  if (
+    !options.observability &&
+    capturePayloads !== undefined &&
+    capturePayloads !== false
+  ) {
+    try {
+      app.use(
+        createNodeHttpPayloadCaptureMiddleware(capturePayloads, {
+          shouldCapturePayloads,
+        }),
+      );
+    } catch (error) {
+      if (!silent) {
+        console.warn(
+          `  \x1b[33m○\x1b[0m  Outray: Payload capture could not be installed (${error instanceof Error ? error.message : "unknown error"})`,
+        );
+      }
+    }
+  }
 
   // Only run in development
   if (process.env.NODE_ENV !== "development" || !enabled) {
@@ -211,4 +294,4 @@ export default function outray(
 
 // Named exports for better tree-shaking
 export { outray };
-export type { OutrayPluginOptions };
+export type { OutrayExpressObservabilityOptions, OutrayPluginOptions };
