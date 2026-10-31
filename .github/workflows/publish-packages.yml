@@ -1,0 +1,39 @@
+name: Publish changed public packages
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Public package to release (only changed artifacts publish)
+        type: choice
+        required: true
+        options: [all, '@outray/runtime-shared', '@outray/core', '@outray/observability', '@outray/express', '@outray/hono', '@outray/nest', '@outray/next', '@outray/tanstack-start', '@outray/vite', outray]
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - name: Verify, bump changed packages and publish
+        env:
+          NPMJS_TOKEN: ${{ secrets.NPMJS_TOKEN }}
+          RELEASE_PACKAGE: ${{ inputs.package }}
+        run: |
+          if [ "$RELEASE_PACKAGE" = all ]; then
+            node scripts/publish-packages.mjs --all
+          else
+            node scripts/publish-packages.mjs --package "$RELEASE_PACKAGE"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reviewed-release-manifests
+          path: |
+            package-lock.json
+            packages/*/package.json
+            apps/cli/package.json
+          retention-days: 7
