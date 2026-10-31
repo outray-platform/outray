@@ -1,0 +1,78 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import type { INestApplication } from "@nestjs/common";
+import {
+  registerOutrayObservability,
+  registerOutrayPayloadCapture,
+} from "../src/index";
+
+function createApp(
+  options: {
+    adapter?: string;
+    initialized?: boolean;
+    listening?: boolean;
+  } = {},
+): { app: INestApplication; middleware: unknown[] } {
+  const middleware: unknown[] = [];
+  const app = {
+    isInitialized: options.initialized ?? false,
+    getHttpAdapter: () => ({ getType: () => options.adapter ?? "express" }),
+    getHttpServer: () => ({ listening: options.listening ?? false }),
+    use(value: unknown) {
+      middleware.push(value);
+      return this;
+    },
+  } as unknown as INestApplication;
+
+  return { app, middleware };
+}
+
+test("capture is registered once before Nest initializes", () => {
+  const { app, middleware } = createApp();
+
+  assert.equal(registerOutrayPayloadCapture(app), true);
+  assert.equal(registerOutrayPayloadCapture(app), true);
+  assert.equal(middleware.length, 1);
+  assert.equal(typeof middleware[0], "function");
+});
+
+test("late and non-Express registration are safe no-ops", () => {
+  const originalWarn = console.warn;
+  console.warn = () => undefined;
+  try {
+    const late = createApp({ listening: true });
+    const fastify = createApp({ adapter: "fastify" });
+
+    assert.equal(registerOutrayPayloadCapture(late.app), false);
+    assert.equal(registerOutrayPayloadCapture(fastify.app), false);
+    assert.equal(late.middleware.length, 0);
+    assert.equal(fastify.middleware.length, 0);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("registers observability from code before Nest initializes", () => {
+  const { app, middleware } = createApp();
+  const options = {
+    apiKey: "test-token",
+    serviceName: "nest-test",
+    environment: "test",
+    enabled: false,
+    capturePayloads: true as const,
+  };
+
+  const observability = registerOutrayObservability(app, options);
+  const duplicate = registerOutrayObservability(app, options);
+  assert.notEqual(observability, false);
+  assert.equal(observability, duplicate);
+  assert.equal(middleware.length, 2);
+  assert.equal(
+    middleware.every((value) => typeof value === "function"),
+    true,
+  );
+  if (observability) {
+    assert.equal(typeof observability.info, "function");
+    assert.equal(typeof observability.error, "function");
+  }
+});
