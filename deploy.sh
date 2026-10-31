@@ -50,44 +50,48 @@ if [ -z "$TINYBIRD_API_HOST" ] || [ -z "$TINYBIRD_INGEST_TOKEN" ]; then
   exit 1
 fi
 
-cd $APP_DIR
-
-# Install Server dependencies
-npm install --omit=dev --engine-strict --no-audit --no-fund
-
-# Determine which instance is currently running
-if pm2 list | grep -q "$BLUE_NAME.*online"; then
-  CURRENT_COLOR="blue"
-  TARGET_COLOR="green"
-  TARGET_PORT=$GREEN_PORT
-  TARGET_NAME=$GREEN_NAME
-  OLD_NAME=$BLUE_NAME
-elif pm2 list | grep -q "outray.*online" && ! pm2 list | grep -q "$GREEN_NAME.*online"; then
-  # Legacy is running
-  echo "⚠️ Legacy outray detected. Treating as Blue."
-  CURRENT_COLOR="legacy"
-  TARGET_COLOR="green"
-  TARGET_PORT=$GREEN_PORT
-  TARGET_NAME=$GREEN_NAME
-  
-  if pm2 list | grep -q "outray-server.*online"; then
-    OLD_NAME="outray-server"
-  else
-    OLD_NAME="outray"
+# Caddy, not the presence of a leftover PM2 process, identifies live traffic.
+# The CI runner passes the validated route; direct invocations read Caddy.
+select_tunnel_slot() {
+  local current_port="${OUTRAY_EDGE_CURRENT_PORT:-}"
+  if [ -z "$current_port" ] && [ -r "$CADDYFILE" ]; then
+    current_port="$(sed -nE 's/.*reverse_proxy[[:space:]]+127\.0\.0\.1:(3547|3548).*/\1/p' "$CADDYFILE" | head -n 1)"
   fi
-else
-  # Default to blue
-  CURRENT_COLOR="green"
-  TARGET_COLOR="blue"
-  TARGET_PORT=$BLUE_PORT
-  TARGET_NAME=$BLUE_NAME
-  OLD_NAME=$GREEN_NAME
-fi
+  case "$current_port" in
+    "$BLUE_PORT")
+      CURRENT_COLOR="blue"
+      TARGET_COLOR="green"
+      TARGET_PORT=$GREEN_PORT
+      TARGET_NAME=$GREEN_NAME
+      OLD_NAME=$BLUE_NAME
+      ;;
+    "$GREEN_PORT")
+      CURRENT_COLOR="green"
+      TARGET_COLOR="blue"
+      TARGET_PORT=$BLUE_PORT
+      TARGET_NAME=$BLUE_NAME
+      OLD_NAME=$GREEN_NAME
+      ;;
+    *)
+      echo "Cannot identify the active Caddy edge route; no process was changed." >&2
+      return 1
+      ;;
+  esac
+}
+select_tunnel_slot
+
+cd "$APP_DIR"
+npm install --omit=dev --engine-strict --no-audit --no-fund
 
 echo "🔵 Current active: $CURRENT_COLOR (or none)"
 echo "🟢 Deploying to: $TARGET_COLOR (Tunnel Server: $TARGET_NAME on Port $TARGET_PORT)"
 
 # 1. Start Tunnel Server
+# Remove only the inactive slot, never the process serving Caddy's live route.
+# Otherwise PM2 --force can create a duplicate with an already-bound port.
+if pm2 describe "$TARGET_NAME" >/dev/null 2>&1; then
+  pm2 delete "$TARGET_NAME"
+fi
 BASE_DOMAIN="$BASE_DOMAIN" \
 WEB_API_URL="${WEB_API_URL:-${OUTRAY_DASHBOARD_URL:-https://outray.co}/api}" \
 PORT=$TARGET_PORT \
