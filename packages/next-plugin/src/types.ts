@@ -1,3 +1,9 @@
+import type {
+  HttpPayloadCaptureContext,
+  HttpPayloadCapturePolicy,
+  HttpPayloadCaptureSetting,
+} from "@outray/core";
+
 /**
  * Configuration options for the Outray Next.js plugin
  */
@@ -23,7 +29,7 @@ export interface OutrayPluginOptions {
 
   /**
    * Outray server WebSocket URL
-   * @default 'wss://api.outray.dev/'
+   * @default 'wss://connect.outray.co/'
    */
   serverUrl?: string;
 
@@ -77,3 +83,29 @@ export interface OutrayPluginOptions {
    */
   onReconnecting?: () => void;
 }
+
+export interface OutrayNextRequestContext extends HttpPayloadCaptureContext {
+  request: Request;
+  pathname: string;
+}
+
+export interface OutrayNextRequestOptions
+  extends HttpPayloadCapturePolicy<OutrayNextRequestContext> {
+  /** Opt in to bounded, redacted request and response capture. */
+  capturePayloads?: HttpPayloadCaptureSetting;
+  /** Record exception details and metric error names. Defaults to true. */
+  recordExceptions?: boolean;
+  /** Resolve a stable route template when pathname normalization is not enough. */
+  routeResolver?: (
+    context: OutrayNextRequestContext,
+  ) => string | null | undefined;
+  /** Skip telemetry for a request. Next.js assets are ignored by default. */
+  ignore?: (context: OutrayNextRequestContext) => boolean;
+  /** Keep framework assets, favicon and robots requests excluded by default. */
+  ignoreDefaultPaths?: boolean;
+}
+
+export type OutrayPayloadCaptureOptions = Exclude<
+  HttpPayloadCaptureSetting,
+  false
+>;
