@@ -17,6 +17,8 @@ import { WSProxy } from "./WSProxy";
 
 import { generateId, generateSubdomain } from "../../../../shared/utils";
 import { config } from "../config";
+import { randomUUID } from "node:crypto";
+import { recordTunnelOpening } from "../lib/product-usage";
 
 export class WSHandler {
   private wss: WebSocketServer;
@@ -87,7 +89,7 @@ export class WSHandler {
     organizationId?: string;
     organization?: any;
     error?: string;
-    tokenType?: "legacy" | "org";
+    tokenType?: "legacy" | "machine" | "org";
     bandwidthLimit?: number;
     retentionDays?: number;
     plan?: string;
@@ -105,7 +107,7 @@ export class WSHandler {
         organizationId?: string;
         organization?: any;
         error?: string;
-        tokenType?: "legacy" | "org";
+        tokenType?: "legacy" | "machine" | "org";
         bandwidthLimit?: number;
         retentionDays?: number;
         plan?: string;
@@ -143,7 +145,7 @@ export class WSHandler {
   }
 
   private async registerTunnelInDatabase(
-    userId: string,
+    userId: string | undefined,
     organizationId: string,
     url: string,
     options?: {
@@ -229,6 +231,15 @@ export class WSHandler {
       });
 
       let tunnelId: string | null = null;
+      const usageSessionId = randomUUID();
+      let usageOpenedAt: string | undefined;
+      let usageRecorded = false;
+      const countOpening = async (organizationId: string | undefined, protocol: "http" | "tcp" | "udp") => {
+        if (usageRecorded) return;
+        usageOpenedAt ??= new Date().toISOString();
+        await recordTunnelOpening(organizationId, protocol, usageSessionId, usageOpenedAt);
+        usageRecorded = true;
+      };
 
       ws.on("message", async (data: WebSocket.Data) => {
         try {
@@ -276,7 +287,7 @@ export class WSHandler {
                   type: "error",
                   code: "PASSWORD_REQUIRES_PAID",
                   message:
-                    "Password-protected tunnels require a paid plan. Upgrade at https://outray.dev/pricing",
+                    "Password-protected tunnels require a paid plan. Upgrade at https://outray.co/pricing",
                 }),
               );
               ws.close();
@@ -323,7 +334,7 @@ export class WSHandler {
 
                 // Register tunnel in database first to get dbTunnelId
                 let dbTunnelId: string | undefined;
-                if (userId && organizationId) {
+                if (organizationId) {
                   const dbResult = await this.registerTunnelInDatabase(
                     userId,
                     organizationId,
@@ -364,6 +375,7 @@ export class WSHandler {
 
                 tunnelId = tunnelIdForProtocol;
                 extWs.tunnelId = tunnelIdForProtocol; // Track for heartbeat logging
+                await countOpening(organizationId, "tcp");
                 ws.send(
                   Protocol.encode({
                     type: "tunnel_opened",
@@ -401,7 +413,7 @@ export class WSHandler {
 
                 // Register tunnel in database first to get dbTunnelId
                 let dbTunnelId: string | undefined;
-                if (userId && organizationId) {
+                if (organizationId) {
                   const dbResult = await this.registerTunnelInDatabase(
                     userId,
                     organizationId,
@@ -442,6 +454,7 @@ export class WSHandler {
 
                 tunnelId = tunnelIdForProtocol;
                 extWs.tunnelId = tunnelIdForProtocol; // Track for heartbeat logging
+                await countOpening(organizationId, "udp");
                 ws.send(
                   Protocol.encode({
                     type: "tunnel_opened",
@@ -498,7 +511,7 @@ export class WSHandler {
 
               // Register tunnel in database and check limits
               let dbTunnelId: string | undefined;
-              if (userId && organizationId) {
+              if (organizationId) {
                 const result = await this.registerTunnelInDatabase(
                   userId,
                   organizationId,
@@ -547,6 +560,7 @@ export class WSHandler {
                 return;
               }
 
+              await countOpening(organizationId, "http");
               ws.send(
                 Protocol.encode({
                   type: "tunnel_opened",
@@ -694,7 +708,7 @@ export class WSHandler {
 
             // Register tunnel in database and check limits
             let dbTunnelId: string | undefined;
-            if (userId && organizationId) {
+            if (organizationId) {
               const result = await this.registerTunnelInDatabase(
                 userId,
                 organizationId,
@@ -779,6 +793,7 @@ export class WSHandler {
               plan,
             });
 
+            await countOpening(organizationId, "http");
             ws.send(response);
             console.log(`Tunnel opened: ${fullHostname}`);
           } else if (message.type === "tcp_data" && tunnelId) {
