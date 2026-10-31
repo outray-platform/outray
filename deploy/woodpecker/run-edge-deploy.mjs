@@ -14,6 +14,7 @@ const names = ["BASE_DOMAIN", "REDIS_URL", "REDIS_TUNNEL_TTL_SECONDS", "REDIS_HE
 const runtime = Object.fromEntries(names.filter(name => typeof current.pm2_env[name] === "string").map(name => [name, current.pm2_env[name]]));
 runtime.OUTRAY_DASHBOARD_URL = "https://outray.co";
 runtime.WEB_API_URL = "https://outray.co/api";
+runtime.OUTRAY_EDGE_CURRENT_PORT = port || String(current.pm2_env.PORT);
 runtime.OUTRAY_STATUS_URL ||= "https://status.outray.app";
 const ca = "/etc/ssl/outray/brimble-ca.pem";
 if (!runtime.NODE_EXTRA_CA_CERTS && existsSync(ca)) {
