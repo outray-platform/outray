@@ -1,0 +1,91 @@
+{
+  "name": "@outray/runtime-shared",
+  "version": "0.1.0",
+  "description": "Server primitives and tunnel contracts shared by OutRay services",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "exports": {
+    "./protocol": {
+      "types": "./dist/protocol.d.ts",
+      "import": "./dist/protocol.js",
+      "require": "./dist/protocol.cjs"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js",
+      "require": "./dist/types.cjs"
+    },
+    "./utils": {
+      "types": "./dist/utils.d.ts",
+      "import": "./dist/utils.js",
+      "require": "./dist/utils.cjs"
+    },
+    "./helpers": {
+      "types": "./dist/helpers.d.ts",
+      "import": "./dist/helpers.js",
+      "require": "./dist/helpers.cjs"
+    },
+    "./words": {
+      "types": "./dist/words.d.ts",
+      "import": "./dist/words.js",
+      "require": "./dist/words.cjs"
+    },
+    "./public-hosts": {
+      "types": "./dist/public-hosts.d.ts",
+      "import": "./dist/public-hosts.js",
+      "require": "./dist/public-hosts.cjs"
+    },
+    "./durable-queue": {
+      "types": "./dist/durable-queue.d.ts",
+      "import": "./dist/durable-queue.js",
+      "require": "./dist/durable-queue.cjs"
+    },
+    "./postgres-ssl": {
+      "types": "./dist/postgres-ssl.d.ts",
+      "import": "./dist/postgres-ssl.js",
+      "require": "./dist/postgres-ssl.cjs"
+    },
+    "./tunnel-product-usage": {
+      "types": "./dist/tunnel-product-usage.d.ts",
+      "import": "./dist/tunnel-product-usage.js",
+      "require": "./dist/tunnel-product-usage.cjs"
+    },
+    "./usage-writer": {
+      "types": "./dist/usage-writer.d.ts",
+      "import": "./dist/usage-writer.js",
+      "require": "./dist/usage-writer.cjs"
+    },
+    "./tunnel-accounting": {
+      "types": "./dist/tunnel-accounting.d.ts",
+      "import": "./dist/tunnel-accounting.js",
+      "require": "./dist/tunnel-accounting.cjs"
+    }
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/outray-platform/outray.git",
+    "directory": "packages/runtime-shared"
+  },
+  "scripts": {
+    "build": "tsup src/*.ts --format cjs,esm --dts --sourcemap --clean --target node20",
+    "test": "tsx --test test/*.test.ts",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "dependencies": {
+    "ioredis": "^5.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "~5.9.3"
+  }
+}
