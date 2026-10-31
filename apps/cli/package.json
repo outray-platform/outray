@@ -1,6 +1,6 @@
 {
   "name": "outray",
-  "version": "0.1.10",
+  "version": "0.1.15",
   "description": "OutRay CLI - Expose your local server to the internet",
   "main": "dist/index.js",
   "bin": {
@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "test": "npm run build && node --test test/*.test.js",
     "build:binaries": "npm run build && pkg . --compress GZip",
     "prepublishOnly": "npm run build"
   },
@@ -38,12 +39,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xt42io/outray.git",
+    "url": "git+https://github.com/outray-platform/outray.git",
     "directory": "apps/cli"
   },
-  "homepage": "https://github.com/xt42io/outray#readme",
+  "homepage": "https://github.com/outray-platform/outray#readme",
   "bugs": {
-    "url": "https://github.com/xt42io/outray/issues"
+    "url": "https://github.com/outray-platform/outray/issues"
   },
   "engines": {
     "node": ">=16.0.0"
@@ -54,7 +55,7 @@
   ],
   "dependencies": {
     "@iarna/toml": "^2.2.5",
-    "@outray/core": "^0.0.4",
+    "@outray/core": "^0.0.7",
     "@types/prompts": "^2.4.9",
     "chalk": "^4.1.2",
     "http-proxy": "^1.18.1",
