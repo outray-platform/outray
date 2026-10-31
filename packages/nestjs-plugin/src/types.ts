@@ -1,11 +1,33 @@
-import { OutrayClientOptions } from "@outray/core";
+import type {
+  HttpPayloadCapturePolicy,
+  HttpPayloadCaptureSetting,
+  NodeHttpPayloadCaptureContext,
+  OutrayClientOptions,
+} from "@outray/core";
+import type {
+  OutrayNodeHttpMiddlewareOptions,
+  OutrayObservabilityOptions,
+} from "@outray/observability";
 
-export interface OutrayPluginOptions extends Partial<
-  Omit<
-    OutrayClientOptions,
-    "localPort" | "onTunnelReady" | "onError" | "onReconnecting" | "onClose"
-  >
-> {
+export interface OutrayNestObservabilityOptions
+  extends OutrayObservabilityOptions,
+    HttpPayloadCapturePolicy<NodeHttpPayloadCaptureContext> {
+  /** Opt in to bounded and redacted request/response capture. */
+  capturePayloads?: HttpPayloadCaptureSetting;
+  /** Customize request filtering and low-cardinality route names. */
+  request?: OutrayNodeHttpMiddlewareOptions;
+}
+
+export interface OutrayPluginOptions
+  extends Partial<
+      Omit<
+        OutrayClientOptions,
+        "localPort" | "onTunnelReady" | "onError" | "onReconnecting" | "onClose"
+      >
+    >,
+    HttpPayloadCapturePolicy<NodeHttpPayloadCaptureContext> {
+  /** Start request tracing, logs, and metrics using in-code configuration. */
+  observability?: OutrayNestObservabilityOptions;
   /**
    * The port the NestJS application is running on.
    * If not provided, the plugin will attempt to resolve it from the NestJS app.
@@ -31,6 +53,14 @@ export interface OutrayPluginOptions extends Partial<
    */
   local?: boolean;
 
+  /**
+   * Opt in to adding redacted, bounded request/response payload attributes to
+   * active OpenTelemetry server spans. Supported by Nest's Express adapter.
+   * This remains independent of the tunnel's `enabled` setting.
+   * @default false
+   */
+  capturePayloads?: HttpPayloadCaptureSetting;
+
   // Event callbacks
   onTunnelReady?: (url: string) => void;
   onLocalReady?: (info: {
@@ -43,3 +73,8 @@ export interface OutrayPluginOptions extends Partial<
   onReconnecting?: () => void;
   onClose?: () => void;
 }
+
+export type OutrayPayloadCaptureOptions = Exclude<
+  HttpPayloadCaptureSetting,
+  false
+>;
