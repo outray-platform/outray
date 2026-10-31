@@ -1,4 +1,5 @@
 import { createServer } from "http";
+import { startOutrayObservability } from "@outray/observability";
 import Redis from "ioredis";
 import { WebSocketServer } from "ws";
 import { TunnelRouter } from "./core/TunnelRouter";
@@ -9,10 +10,33 @@ import { UDPProxy } from "./core/UDPProxy";
 import { WSProxy } from "./core/WSProxy";
 import { LogManager } from "./core/LogManager";
 import { config } from "./config";
+import publicHosts from "../../../shared/public-hosts";
 import {
-  checkTimescaleDBConnection,
+  startTinybirdLoggers,
   shutdownLoggers,
-} from "./lib/timescale";
+} from "./lib/tinybird";
+import {
+  closeStatusRouting,
+  isActiveStatusCustomDomain,
+  isStatusPlatformHost,
+  normalizeHost,
+  proxyToStatus,
+} from "./lib/status-routing";
+
+if (process.env.OUTRAY_API_KEY) {
+  try {
+    startOutrayObservability({
+      serviceName: "outray-connect",
+      endpoint: process.env.OUTRAY_OTLP_ENDPOINT,
+      environment: process.env.NODE_ENV,
+      captureConsole: true,
+      autoInstrumentations: false,
+      redactedLogFields: ["body", "data", "result", "content", "env"],
+    });
+  } catch {
+    console.error("Observability initialization failed");
+  }
+}
 
 const redis = new Redis(config.redisUrl, {
   lazyConnect: true,
@@ -152,18 +176,35 @@ wssDashboard.on("connection", async (ws, req) => {
 });
 
 httpServer.on("upgrade", (request, socket, head) => {
-  const host = (request.headers.host || "").split(":")[0].toLowerCase();
+  void (async () => {
+  const host = normalizeHost(request.headers.host);
   const { pathname } = new URL(request.url || "", "http://localhost");
+
+  // Public status pages have no WebSocket endpoint. In particular, never
+  // permit a status host to fall through to a tunnel with the same hostname.
+  if (isStatusPlatformHost(host)) {
+    socket.end("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\n\r\n");
+    return;
+  }
+  if (!host) {
+    socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+    return;
+  }
+  try {
+    if (await isActiveStatusCustomDomain(host, config.baseDomain.toLowerCase())) {
+      socket.end("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\n\r\n");
+      return;
+    }
+  } catch {
+    socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
+    return;
+  }
 
   if (pathname === "/dashboard/events") {
     wssDashboard.handleUpgrade(request, socket, head, (ws) => {
       wssDashboard.emit("connection", ws, request);
     });
-  } else if (
-    host === config.baseDomain.toLowerCase() ||
-    host === "localhost" ||
-    host.startsWith("api.")
-  ) {
+  } else if (publicHosts.isTunnelControlHost(host, config.baseDomain)) {
     // Control plane WebSocket (CLI clients connecting)
     wssTunnel.handleUpgrade(request, socket, head, (ws) => {
       wssTunnel.emit("connection", ws, request);
@@ -172,15 +213,36 @@ httpServer.on("upgrade", (request, socket, head) => {
     // End-user WebSocket to a tunneled subdomain
     wsProxy.handleUpgrade(request, socket, head);
   }
+  })();
 });
 
 httpServer.on("request", async (req, res) => {
-  const host = req.headers.host || "";
+  const host = normalizeHost(req.headers.host);
   const url = new URL(req.url || "", "http://localhost");
+
+  if (!host) {
+    res.writeHead(400, { "Content-Type": "text/plain" });
+    res.end("Invalid Host");
+    return;
+  }
+  if (isStatusPlatformHost(host)) {
+    proxyToStatus(req, res);
+    return;
+  }
+  try {
+    if (await isActiveStatusCustomDomain(host, config.baseDomain.toLowerCase())) {
+      proxyToStatus(req, res);
+      return;
+    }
+  } catch {
+    res.writeHead(503, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
+    res.end("Host routing temporarily unavailable");
+    return;
+  }
   
   // Health check endpoint — only for the tunnel server itself, not tunneled subdomains
-  const cleanHost = host.split(":")[0].toLowerCase();
-  const isBaseDomain = cleanHost === config.baseDomain.toLowerCase() || cleanHost === "localhost";
+  const cleanHost = host;
+  const isBaseDomain = publicHosts.isTunnelControlHost(cleanHost, config.baseDomain);
   
   if (url.pathname === "/health" && isBaseDomain) {
     const redisStatus = redis.status === "ready" ? "healthy" : "unhealthy";
@@ -202,7 +264,7 @@ httpServer.on("request", async (req, res) => {
     return;
   }
   
-  if (host.startsWith("api.")) {
+  if (publicHosts.isTunnelControlHost(host, config.baseDomain) && host !== config.baseDomain.toLowerCase() && host !== "localhost") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "ok", version: "1.0.0" }));
     return;
@@ -210,20 +272,25 @@ httpServer.on("request", async (req, res) => {
   proxy.handleRequest(req, res);
 });
 
-httpServer.listen(config.port, () => {
-  console.log(`OutRay Server running on port ${config.port}`);
+httpServer.listen(config.port, config.bindHost, () => {
+  console.log(`OutRay Server running on ${config.bindHost}:${config.port}`);
   console.log(`Base domain: ${config.baseDomain}`);
-  void checkTimescaleDBConnection();
+  startTinybirdLoggers();
 });
 
 const shutdown = async () => {
   console.log("Shutting down tunnel server...");
   wsHandler.shutdown();
   await router.shutdown();
-  await redis.quit();
+  await closeStatusRouting();
   
-  // Flush buffered logs and close database connection
-  await shutdownLoggers();
+  // Persist buffered analytics before stopping; Redis owns queued deliveries.
+  try {
+    await shutdownLoggers();
+  } catch {
+    console.error("Tunnel analytics shutdown failed; some buffered records were not persisted");
+  }
+  await redis.quit();
   
   httpServer.close(() => process.exit(0));
 };
