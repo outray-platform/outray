@@ -7,7 +7,7 @@ MIT-licensed tunnel edge, CLI, SDKs and client integrations for OutRay.
 - `packages`: `@outray/core`, `@outray/observability`, Express, Hono, NestJS, Next.js, TanStack Start and Vite integrations, plus shared server primitives.
 - `plugins/outray`: the public MCP client plugin; the MCP server is not part of this repository.
 
-The hosted console and product backends live in the private [platform repository](https://github.com/outray-platform/platform/tree/next). Full-platform self-hosting requires authorized private access. The edge alone is not a complete control plane: it requires Redis and a compatible authenticated control-plane API. Authentication is not bypassed when running locally.
+The hosted console and product backends live in the private [platform repository](https://github.com/outray-platform/platform/tree/next). The edge alone is not a complete control plane: it requires Redis and a compatible authenticated control-plane API. Authentication is not bypassed when running locally.
 
 ## Development
 
@@ -19,7 +19,7 @@ npm run build
 npm test
 ```
 
-Copy `.env.example` to `.env` and configure a compatible control plane before `npm run dev:tunnel`. No private source checkout or icon license is needed to build these tools. Standard hosted SDK and CLI defaults remain unchanged; use the installation's configured base URL for self-hosted instances.
+Copy `.env.example` to `.env` and configure a compatible control plane before `npm run dev:tunnel`. No private source checkout or icon license is needed to build these tools. Standard hosted SDK and CLI defaults remain unchanged; integrations can explicitly configure a different base URL.
 
 ## Releases
 
