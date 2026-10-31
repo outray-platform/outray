@@ -1,6 +1,6 @@
 {
   "name": "@outray/runtime-shared",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Server primitives and tunnel contracts shared by OutRay services",
   "type": "module",
   "license": "MIT",
@@ -64,6 +64,16 @@
       "types": "./dist/tunnel-accounting.d.ts",
       "import": "./dist/tunnel-accounting.js",
       "require": "./dist/tunnel-accounting.cjs"
+    },
+    "./buffered-logger": {
+      "types": "./dist/buffered-logger.d.ts",
+      "import": "./dist/buffered-logger.js",
+      "require": "./dist/buffered-logger.cjs"
+    },
+    "./tinybird-records": {
+      "types": "./dist/tinybird-records.d.ts",
+      "import": "./dist/tinybird-records.js",
+      "require": "./dist/tinybird-records.cjs"
     }
   },
   "engines": {
