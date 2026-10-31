@@ -1,2 +1,1 @@
-export * from "./words";
-export * from "./helpers";
+export * from "@outray/runtime-shared/utils";
