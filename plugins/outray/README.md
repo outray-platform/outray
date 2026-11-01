@@ -1,19 +1,29 @@
 # OutRay plugin
 
-The initial public release is **0.0.1**. Local Codex cachebusters use build metadata (`0.0.1+codex.…`); they do not advance the product release version. Earlier private account test uploads are not public releases.
+Connect OutRay to Codex and ChatGPT to work with your tunnels, observability, uptime and Secrets.
 
-This package connects Codex and ChatGPT to OutRay's hosted public MCP catalog at `https://outray.co/api/mcp/openai`. The backend and direct MCP catalog are implemented by the same OutRay web application.
+## Capabilities
 
-The four bundled skills cover local tunnels, SDK setup and investigation, Secrets administration and opaque local injection, and organization/uptime administration. Local execution is optional; the plugin is not marked desktop-only.
+- [Tunnels](skills/tunnels/SKILL.md) — expose local apps and test webhooks.
+- [Observability](skills/observability/SKILL.md) — configure SDKs and investigate requests, traces and logs.
+- [Secrets](skills/secrets/SKILL.md) — manage vault metadata and inject configuration into local commands without displaying secret values.
+- [Administration](skills/administration/SKILL.md) — manage organizations, uptime monitors, status pages and incidents.
 
-Build and validate the archive with `npm run plugin:package` from the repository root. This creates a development archive under `dist/plugins/`. `npm run plugin:check` checks package structure. `npm run plugin:check -- --release` additionally checks the release prerequisites and intentionally fails while publisher identity or demo evidence is missing.
+## Authentication
 
-The repository's `.agents/plugins/marketplace.json` tests the portable package and raw MCP transport. It does not establish the registered account dependency needed to test Codex's native installation sign-in and Manage → Connect UI. For that flow, first register the OAuth MCP app, then run `npm run plugin:prepare:native -- --app-manifest /path/to/verified-outray.app.json`. This generates a local test marketplace with OutRay as a required account connection and authentication on installation. Install it through Codex's Plugins UI to test onboarding. Use a reachable HTTPS endpoint, or a configured Secure MCP Tunnel, for registration; ChatGPT cannot connect directly to a developer's localhost.
+The plugin connects to `https://outray.co/api/mcp/openai` using OAuth and respects your OutRay organization permissions. It does not expose secret values or authentication credentials, and it does not make purchases or change subscriptions.
 
-The generated test copy uses the same skills and backend. Its account binding stays outside the public-upload source and archive. Public submission converts the verified HTTPS MCP configuration into the directory's managed connection; retain that generated binding when updating the finalized release.
+Local workflows require local command execution. Authenticate the CLI separately with `outray login` when using those workflows.
 
-For repeated local tests, update the existing local installation and reuse its verified app binding. Saving another private account package creates an additional plugin entry; it is not a refresh of the local installation. Plugin authentication uses **Connect** and browser consent. `outray login` authenticates local CLI commands separately.
+## Development
 
-Package validation requires both listing and composer icons, verifies every referenced PNG, and rejects private app bindings in hidden compatibility manifests as well as the portable manifest. A compatibility manifest, when included, must preserve the same identity, branding and public MCP configuration. The public archive must not include a temporary tunnel address.
+From the repository root:
 
-See `docs/outray-mcp-release.md` in the repository for deployment, reviewer fixtures and submission steps. A valid development ZIP does not mean the endpoint has been deployed or the plugin has been submitted, reviewed or published.
+```sh
+npm run plugin:check
+npm run plugin:package
+```
+
+The archive is written to `dist/plugins/`. Validation checks the manifest, skills, icons and OAuth configuration, and rejects credentials and account-specific bindings.
+
+For the native development helper's options, run `npm run plugin:prepare:native -- --help`.
