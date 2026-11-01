@@ -1,8 +1,7 @@
 .git
-.self-hosted-artifacts
-.self-hosted-state
+.*-artifacts
+.*-state
 **/node_modules
-packages/icons/generated
 **/dist
 **/.output
 **/.astro
