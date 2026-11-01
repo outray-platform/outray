@@ -73,7 +73,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (values.help) {
       console.log("Usage: npm run plugin:prepare:native -- --app-manifest /path/to/verified-outray.app.json [--output /new/generated/directory]");
     } else {
-      if (!values["app-manifest"]) throw new Error("Register OutRay's OAuth MCP app first, then supply its verified binding with --app-manifest. See docs/outray-mcp-release.md#native-installation-and-connect.");
+      if (!values["app-manifest"]) throw new Error("Supply the registered OutRay app's verified binding with --app-manifest. Run npm run plugin:prepare:native -- --help for usage.");
       const appManifest = JSON.parse(await readFile(resolve(values["app-manifest"]), "utf8"));
       const result = await prepareNativePlugin({ appManifest, outputDirectory: values.output });
       console.log(`Prepared native test plugin ${result.version} at ${result.output}`);
