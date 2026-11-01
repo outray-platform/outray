@@ -1,4 +1,4 @@
-/** Edge routing flags only; private platform limits and entitlements are not included. */
+/** Edge routing flags only; limits and entitlements are enforced by the control plane. */
 export function instanceConfig(env: Record<string, string | undefined> = process.env) {
   const mode = env.OUTRAY_DEPLOYMENT_MODE || "hosted";
   if (!["hosted", "self-hosted"].includes(mode)) throw new Error("OUTRAY_DEPLOYMENT_MODE must be hosted or self-hosted");
