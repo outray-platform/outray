@@ -18,5 +18,5 @@ scp "${ssh_options[@]}" -P 22022 -r apps/tunnel/dist "$host:$release/tunnel/"
 scp "${ssh_options[@]}" -P 22022 "$temporary_dir/package.json" "$host:$release/tunnel/package.json"
 scp "${ssh_options[@]}" -P 22022 deploy.sh "$host:$release/"
 scp "${ssh_options[@]}" -P 22022 deploy/woodpecker/run-edge-deploy.mjs "$host:$release/deploy/woodpecker/"
-# The same host lock is used by the private pipeline. Upload paths never overlap.
+# All deployments sharing this host use the same lock and separate upload paths.
 ssh "${ssh_options[@]}" -p 22022 "$host" "flock --exclusive --timeout 900 /var/lock/outray-deployment.lock node '$release/deploy/woodpecker/run-edge-deploy.mjs'"
