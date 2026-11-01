@@ -1,11 +1,11 @@
 # Public edge deployment
 
-This repository owns only the tunnel edge and public client releases. It never deploys platform migrations, internal-check, cron, probes, or status renderers.
+This repository's release pipeline builds the tunnel edge, CLI and SDKs. Deployment scripts manage only the edge and its gateway routing, not unrelated services or database migrations.
 
-`Dockerfile` builds an independent edge image without private source or an icon license. The GitHub image workflow publishes `ghcr.io/outray-platform/outray-edge:<full-source-commit>` for amd64/arm64. Deployment pipelines pin the immutable registry digest and verify the OCI revision label.
+`Dockerfile` builds the edge image. The GitHub image workflow publishes `ghcr.io/outray-platform/outray-edge:<full-source-commit>` for amd64/arm64. Deployment pipelines pin the immutable registry digest and verify the OCI revision label.
 
-The hosted VPS promotion is a manual Woodpecker step on public `main`, using only `edge_ssh_key`. `deploy/woodpecker/deploy-edge.sh` uploads a unique `/root/outray-edge/releases/<commit>-<id>` artifact and holds `/var/lock/outray-deployment.lock` during promotion. Private service deployment uses the same host lock and a different artifact root. Existing edge runtime settings are retained from the active PM2 edge; no private vault master keys, billing/email keys or Ops Secrets token are required by public CI.
+The hosted VPS promotion is a manual Woodpecker step on `main`, using `edge_ssh_key`. `deploy/woodpecker/deploy-edge.sh` uploads a unique `/root/outray-edge/releases/<commit>-<id>` artifact and holds `/var/lock/outray-deployment.lock` during promotion. All deployers sharing the host must respect this lock and use separate artifact directories. Existing edge runtime settings are retained from the active PM2 edge.
 
-The blue/green edge continues to use its existing authenticated console API, status-forwarding contract, Redis queue and accounting adapter. It manages the edge/Caddy route only. Cron stays independently hosted on Aeroplane; no edge deployment starts another cron process.
+The blue/green deployment preserves the authenticated control-plane API, status forwarding, Redis queues and accounting adapters.
 
-For local edge development configure `.env.example` against a compatible control plane. This document describes internal release ownership, not an installation guide.
+For local edge development, configure `.env.example` against a compatible control plane.
