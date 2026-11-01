@@ -134,7 +134,7 @@ if [ "$UPTIME_ENABLED" = "true" ]; then
   fi
 fi
 
-# 2. Update Caddyfile (console deployment is owned by the private platform)
+# 2. Update edge gateway routing; console configuration is managed separately.
 echo "🔄 Updating Caddyfile..."
 
 if [ ! -r /etc/caddy/cloudflare.env ]; then
