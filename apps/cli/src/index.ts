@@ -1,15 +1,21 @@
 #!/usr/bin/env node
 
 import chalk from "chalk";
+import dns from "dns";
+import fs from "fs";
+import net from "net";
+import os from "os";
 import path from "path";
-import { OutRayClient } from "./client";
-import { TCPTunnelClient } from "./tcp-client";
-import { UDPTunnelClient } from "./udp-client";
-import { ConfigManager, OutRayConfig, canonicalConsoleOrigin } from "./config";
-import { AuthManager } from "./auth";
-import { TomlConfigParser, ParsedTunnelConfig } from "./toml-config";
-import { runSecretsCommand } from "./secrets-cli";
+import WebSocket from "ws";
 import { version } from "../package.json";
+import { AuthManager } from "./auth";
+import { OutRayClient } from "./client";
+import { ConfigManager, OutRayConfig, canonicalConsoleOrigin } from "./config";
+import { SecretsApiClient, SecretsApiError } from "./secrets-api";
+import { runSecretsCommand } from "./secrets-cli";
+import { TCPTunnelClient } from "./tcp-client";
+import { TomlConfigParser } from "./toml-config";
+import { UDPTunnelClient } from "./udp-client";
 
 function getFlagValue(args: string[], flag: string): string | undefined {
   const match = args.find((arg) => arg === flag || arg.startsWith(`${flag}=`));
@@ -412,6 +418,175 @@ async function handleStartFromConfig(
   process.on("SIGTERM", shutdown);
 }
 
+interface DoctorCheck {
+  name: string;
+  passed: boolean;
+  details: string;
+}
+
+interface DoctorOptions {
+  webUrl: string;
+  serverUrl: string;
+  apiToken?: string;
+  userToken?: string;
+  activeOrgId?: string;
+}
+
+async function runDoctor(options: DoctorOptions): Promise<DoctorCheck[]> {
+  const runtimeCheck: DoctorCheck = (() => {
+    const nodeVersion = process.versions.node;
+    const supported = Number(nodeVersion.split(".")[0]) >= 16;
+    return {
+      name: "Runtime",
+      passed: supported,
+      details: `Node.js ${nodeVersion} (${supported ? "supported" : "requires Node.js 16 or newer"}); ${process.platform} ${os.release()}`,
+    };
+  })();
+
+  const credentialsCheck = async (): Promise<DoctorCheck> => {
+    try {
+      if (options.apiToken) {
+        const result = await new SecretsApiClient(
+          options.webUrl,
+          options.apiToken,
+        ).targets();
+        return {
+          name: "API credentials",
+          passed: true,
+          details: `Credential accepted (${result.organizations.length} organization(s) available)`,
+        };
+      }
+
+      if (options.userToken) {
+        const organizations = await new AuthManager(
+          options.webUrl,
+          options.userToken,
+        ).fetchOrganizations();
+        const activeOrgExists = options.activeOrgId
+          ? organizations.some(
+              (organization) => organization.id === options.activeOrgId,
+            )
+          : true;
+        return {
+          name: "API credentials",
+          passed: activeOrgExists,
+          details: activeOrgExists
+            ? `User token accepted (${organizations.length} organization(s) available)`
+            : "User token accepted, but the configured active organization is unavailable",
+        };
+      }
+
+      return {
+        name: "API credentials",
+        passed: false,
+        details: "No credentials found; run `outray login` or pass --key",
+      };
+    } catch (error) {
+      const details =
+        error instanceof SecretsApiError
+          ? `Credential rejected (HTTP ${error.status})`
+          : error instanceof Error
+            ? error.message
+            : "Credential validation failed";
+      return { name: "API credentials", passed: false, details };
+    }
+  };
+
+  const dnsCheck = async (): Promise<DoctorCheck> => {
+    try {
+      const hostname = new URL(options.serverUrl).hostname;
+      const startedAt = Date.now();
+      const result = await dns.promises.lookup(hostname);
+      return {
+        name: "DNS",
+        passed: true,
+        details: `${hostname} resolved to ${result.address} in ${Date.now() - startedAt} ms`,
+      };
+    } catch (error) {
+      return {
+        name: "DNS",
+        passed: false,
+        details:
+          error instanceof Error
+            ? error.message
+            : "Could not resolve relay host",
+      };
+    }
+  };
+
+  const relayCheck = async (): Promise<DoctorCheck> =>
+    new Promise((resolve) => {
+      const startedAt = Date.now();
+      let settled = false;
+      let timeout: NodeJS.Timeout;
+      let socket: WebSocket;
+
+      const finish = (passed: boolean, details: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (socket.readyState === WebSocket.CONNECTING) socket.terminate();
+        else if (socket.readyState === WebSocket.OPEN) socket.close();
+        resolve({ name: "Edge relay", passed, details });
+      };
+
+      try {
+        socket = new WebSocket(options.serverUrl);
+        timeout = setTimeout(
+          () => finish(false, "Connection timed out after 5 seconds"),
+          5000,
+        );
+        socket.once("open", () => {
+          finish(
+            true,
+            `WebSocket handshake succeeded in ${Date.now() - startedAt} ms`,
+          );
+        });
+        socket.once("error", (error) => finish(false, error.message));
+      } catch (error) {
+        resolve({
+          name: "Edge relay",
+          passed: false,
+          details:
+            error instanceof Error
+              ? error.message
+              : "Could not connect to relay",
+        });
+      }
+    });
+
+  const loopbackCheck = async (): Promise<DoctorCheck> =>
+    new Promise((resolve) => {
+      const server = net.createServer();
+      server.once("error", (error) => {
+        resolve({
+          name: "Local loopback",
+          passed: false,
+          details: error.message,
+        });
+      });
+      server.listen(0, "127.0.0.1", () => {
+        server.close((error) => {
+          resolve({
+            name: "Local loopback",
+            passed: !error,
+            details: error
+              ? error.message
+              : "Successfully bound and released a temporary 127.0.0.1 port",
+          });
+        });
+      });
+    });
+
+  return Promise.all([
+    Promise.resolve(runtimeCheck),
+    credentialsCheck(),
+    dnsCheck(),
+    relayCheck(),
+    loopbackCheck(),
+  ]);
+}
+
 function printHelp() {
   console.log(chalk.cyan("\nUsage:"));
   console.log(chalk.cyan("  outray login           Login via browser"));
@@ -425,7 +600,12 @@ function printHelp() {
   console.log(chalk.cyan("  outray udp <port>      Start UDP tunnel"));
   console.log(chalk.cyan("  outray switch [org]    Switch organization"));
   console.log(chalk.cyan("  outray whoami          Show current user"));
-  console.log(chalk.cyan("  outray secrets         Manage application secrets"));
+  console.log(
+    chalk.cyan("  outray doctor          Diagnose CLI connectivity and auth"),
+  );
+  console.log(
+    chalk.cyan("  outray secrets         Manage application secrets"),
+  );
   console.log(chalk.cyan("  outray logout          Logout"));
   console.log(chalk.cyan("  outray version         Show version"));
   console.log(chalk.cyan("  outray help            Show this help message"));
@@ -443,7 +623,9 @@ function printHelp() {
   console.log(
     chalk.cyan("  --remote-port <port>   Remote port (TCP/UDP only)"),
   );
-  console.log(chalk.cyan("  --password <password>  Password protect HTTP tunnel"));
+  console.log(
+    chalk.cyan("  --password <password>  Password protect HTTP tunnel"),
+  );
   console.log(chalk.cyan("  --key <token>          Override auth token"));
   console.log(
     chalk.cyan("  --no-logs              Disable tunnel request logs"),
@@ -470,7 +652,8 @@ async function main() {
     (isDev ? "ws://localhost:3547" : "wss://connect.outray.co/");
   const webUrl = canonicalConsoleOrigin(
     process.env.OUTRAY_WEB_URL ||
-    (isDev ? "http://localhost:6767" : "https://outray.co"));
+      (isDev ? "http://localhost:6767" : "https://outray.co"),
+  );
 
   const configManager = new ConfigManager(isDev, webUrl);
 
@@ -513,10 +696,53 @@ async function main() {
       process.exitCode = exitCode;
     } catch (error) {
       console.error(
-        chalk.red(error instanceof Error ? error.message : "Secrets command failed."),
+        chalk.red(
+          error instanceof Error ? error.message : "Secrets command failed.",
+        ),
       );
       process.exitCode = 1;
     }
+    return;
+  }
+
+  if (command === "doctor") {
+    let doctorServerUrl = serverUrl;
+    const configArg = getFlagValue(args, "--config");
+    const configPath =
+      configArg || path.join(process.cwd(), "outray", "config.toml");
+
+    if (configArg || fs.existsSync(configPath)) {
+      try {
+        const tunnelConfig = TomlConfigParser.loadTomlConfig(configPath);
+        doctorServerUrl = tunnelConfig.global?.server_url || doctorServerUrl;
+      } catch (error) {
+        console.log(
+          chalk.yellow(
+            `Could not read tunnel config: ${error instanceof Error ? error.message : "Unknown error"}`,
+          ),
+        );
+      }
+    }
+
+    const config = configManager.load();
+    const apiToken =
+      getFlagValue(args, "--key")?.trim() ||
+      process.env.OUTRAY_TOKEN?.trim() ||
+      process.env.OUTRAY_API_KEY?.trim();
+    const checks = await runDoctor({
+      webUrl,
+      serverUrl: doctorServerUrl,
+      apiToken,
+      userToken: config?.userToken,
+      activeOrgId: config?.activeOrgId,
+    });
+
+    console.log(chalk.cyan("\nOutRay Doctor\n"));
+    for (const check of checks) {
+      const marker = check.passed ? chalk.green("PASS") : chalk.red("FAIL");
+      console.log(`[${marker}] ${check.name}: ${check.details}`);
+    }
+    process.exitCode = checks.every((check) => check.passed) ? 0 : 1;
     return;
   }
 
@@ -746,7 +972,7 @@ async function main() {
     });
 
     // Keep process alive
-    await new Promise(() => { });
+    await new Promise(() => {});
     return;
   }
 
