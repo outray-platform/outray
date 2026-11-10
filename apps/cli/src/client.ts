@@ -1,5 +1,9 @@
 import WebSocket from "ws";
 import chalk from "chalk";
+import {
+  formatAllowedDevOriginsHint,
+  isNextDevServer,
+} from "./next-dev-origins";
 import prompts from "prompts";
 import { encodeMessage, decodeMessage } from "@outray/core";
 import type {
@@ -11,6 +15,8 @@ import type {
 } from "@outray/core";
 import http from "http";
 import { MDNSAdvertiser, LocalProxy, LocalHttpsProxy } from "./mdns";
+
+let nextDevOriginsHintShown = false;
 
 export class OutRayClient {
   private ws: WebSocket | null = null;
@@ -344,6 +350,7 @@ export class OutRayClient {
             ` ${chalk.bold(message.method)} ${message.path} ${statusColor(statusCode)} ${chalk.dim(`${duration}ms`)}`,
           );
         }
+        this.maybeShowNextDevOriginsHint(message.path, res.headers);
 
         const bodyBuffer = Buffer.concat(chunks);
         const bodyBase64 =
@@ -389,6 +396,18 @@ export class OutRayClient {
     req.end();
   }
 
+  private maybeShowNextDevOriginsHint(
+    path: string | undefined,
+    headers?: http.IncomingHttpHeaders,
+  ): void {
+    if (nextDevOriginsHintShown || !this.assignedUrl) return;
+    if (!isNextDevServer(path, headers)) return;
+    const hint = formatAllowedDevOriginsHint(this.assignedUrl);
+    if (!hint) return;
+    nextDevOriginsHintShown = true;
+    console.log(`\n${chalk.yellow(hint)}\n`);
+  }
+
   private extractSubdomain(url: string): string | null {
     try {
       const hostname = new URL(url).hostname;
@@ -406,6 +425,7 @@ export class OutRayClient {
 
   private handleWSUpgrade(message: WSUpgradeMessage): void {
     const wsUrl = `ws://localhost:${this.localPort}${message.path}`;
+    this.maybeShowNextDevOriginsHint(message.path);
 
     try {
       const headers: Record<string, string> = {};
