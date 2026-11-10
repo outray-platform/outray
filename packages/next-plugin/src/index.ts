@@ -18,6 +18,11 @@ import type {
   OutrayPayloadCaptureOptions,
   OutrayPluginOptions,
 } from "./types";
+import {
+  formatAllowedDevOriginsHint,
+  isDevOriginAllowed,
+  tunnelHostname,
+} from "./dev-origins";
 import packageMetadata from "../package.json" with { type: "json" };
 export { withOutraySpan } from "@outray/observability";
 
@@ -46,6 +51,7 @@ function getNextRequestMetrics() {
 let client: OutrayClient | null = null;
 let localAccess: LocalAccessManager | null = null;
 let tunnelStarted = false;
+let devOriginsHintShown = false;
 
 /**
  * Next.js plugin that automatically starts an Outray tunnel when the dev server starts.
@@ -97,7 +103,7 @@ export default function withOutray(
 
     // Small delay to let the server bind to the port first
     setTimeout(() => {
-      startTunnel(options, silent, local);
+      startTunnel(options, silent, local, nextConfig.allowedDevOrigins);
     }, 2000);
   }
 
@@ -108,6 +114,7 @@ function startTunnel(
   options: OutrayPluginOptions,
   silent: boolean,
   local: boolean,
+  allowedDevOrigins: readonly string[] | undefined,
 ): void {
   const port = parseInt(process.env.PORT || "3000", 10);
   const apiKey = options.apiKey ?? process.env.OUTRAY_API_KEY;
@@ -164,6 +171,7 @@ function startTunnel(
       if (!silent) {
         const colorUrl = `\x1b[36m${url}\x1b[0m`;
         console.log(`  \x1b[32m➜\x1b[0m  \x1b[1mTunnel:\x1b[0m  ${colorUrl}`);
+        showDevOriginsHint(url, allowedDevOrigins);
       }
       options.onTunnelReady?.(url);
     },
@@ -206,6 +214,20 @@ function startTunnel(
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
   process.on("exit", cleanup);
+}
+
+function showDevOriginsHint(
+  url: string,
+  allowedDevOrigins: readonly string[] | undefined,
+): void {
+  if (devOriginsHintShown) return;
+  const hostname = tunnelHostname(url);
+  if (!hostname || isDevOriginAllowed(allowedDevOrigins, hostname)) return;
+  devOriginsHintShown = true;
+  const lines = formatAllowedDevOriginsHint(hostname);
+  console.log(
+    `\n${lines.map((line) => (line ? `  \x1b[33m${line}\x1b[0m` : "")).join("\n")}\n`,
+  );
 }
 
 function pathnameFrom(request: Request): string {
