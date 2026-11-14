@@ -170,7 +170,7 @@ export class OutrayClient {
   }
 
   private handleError(code: string, message: string): void {
-    if (code === "SUBDOMAIN_IN_USE" && this.assignedUrl && !this.forceTakeover) {
+    if (code === "SUBDOMAIN_IN_USE" && this.options.apiKey && this.assignedUrl && !this.forceTakeover) {
       // Reconnecting and subdomain is in use - try to take over
       this.forceTakeover = true;
       this.connect();
@@ -180,7 +180,7 @@ export class OutrayClient {
     this.options.onError?.(new Error(message), code);
 
     // Fatal errors - stop reconnecting
-    if (code === "AUTH_FAILED" || code === "LIMIT_EXCEEDED") {
+    if (["AUTH_FAILED", "AUTH_REQUIRED", "LIMIT_EXCEEDED", "TUNNEL_EXPIRED", "RATE_LIMITED"].includes(code) || (code === "SUBDOMAIN_IN_USE" && !this.options.apiKey)) {
       this.shouldReconnect = false;
       this.stop();
     }
@@ -413,6 +413,11 @@ export class OutrayClient {
     this.stopPing();
     this.stopPongTimeout();
 
+    if (code === 1008) {
+      this.options.onClose?.(reason?.toString() || "Server policy");
+      this.stop();
+      return;
+    }
     if (!this.shouldReconnect) return;
 
     const reasonStr = reason?.toString() || "";
@@ -424,7 +429,7 @@ export class OutrayClient {
     }
 
     // If we previously had a tunnel URL, force takeover on reconnect
-    if (this.assignedUrl) {
+    if (this.assignedUrl && this.options.apiKey) {
       this.forceTakeover = true;
     }
 

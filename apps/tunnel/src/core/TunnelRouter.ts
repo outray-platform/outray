@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import Redis from "ioredis";
+import { randomUUID } from "node:crypto";
 import { Protocol, RequestMessage, ResponseMessage, Message } from "./Protocol";
 import { generateId } from "../../../../shared/utils";
 
@@ -27,6 +28,9 @@ export interface TunnelMetadata {
   plan?: string;
   fullCaptureEnabled?: boolean;
   password?: string;
+  expiresAt?: number;
+  guestLeaseKey?: string;
+  guestSessionId?: string;
 }
 
 export class TunnelRouter {
@@ -39,6 +43,9 @@ export class TunnelRouter {
   private readonly heartbeatIntervalMs: number;
   private readonly requestTimeoutMs: number;
   private heartbeatTimer?: NodeJS.Timeout;
+  private refreshing = false;
+  private expiryTimers = new Map<string, NodeJS.Timeout>();
+  private connectionIds = new WeakMap<WebSocket, string>();
 
   constructor(options: TunnelRouterOptions = {}) {
     this.redis = options.redis;
@@ -71,7 +78,8 @@ export class TunnelRouter {
       const ws = this.tunnels.get(tunnelId);
       if (ws) {
         console.log(`Received kill command for tunnel ${tunnelId}`);
-        ws.close(1000, "Tunnel stopped by user");
+        void this.unregisterTunnel(tunnelId, ws);
+        ws.terminate();
       }
       return;
     }
@@ -121,60 +129,71 @@ export class TunnelRouter {
     ws: WebSocket,
     metadata?: TunnelMetadata,
   ): Promise<boolean> {
-    this.tunnels.set(tunnelId, ws);
-    if (metadata) {
-      this.tunnelMetadata.set(tunnelId, metadata);
+    if (this.tunnels.get(tunnelId) !== ws) {
+      if (ws.readyState !== WebSocket.OPEN) {
+        await this.releaseTunnelState(tunnelId, ws, metadata);
+        return false;
+      }
+      return this.reserveTunnel(tunnelId, ws, metadata);
     }
-    const persisted = await this.persistTunnelState(tunnelId, "XX", metadata);
-    if (!persisted) {
-      this.tunnels.delete(tunnelId);
-      this.tunnelMetadata.delete(tunnelId);
+    if (metadata) this.tunnelMetadata.set(tunnelId, metadata);
+    this.scheduleExpiry(tunnelId, ws, metadata);
+    if (ws.readyState !== WebSocket.OPEN) {
+      await this.unregisterTunnel(tunnelId, ws);
+      return false;
     }
-    return persisted;
+    const persisted = await this.persistTunnelState(tunnelId, "XX", ws, metadata);
+    if (!persisted || ws.readyState !== WebSocket.OPEN) {
+      await this.unregisterTunnel(tunnelId, ws);
+      return false;
+    }
+    return true;
   }
 
   async unregisterTunnel(tunnelId: string, ws: WebSocket): Promise<void> {
-    const currentWs = this.tunnels.get(tunnelId);
-    if (currentWs !== ws) {
-      return;
-    }
-
+    if (this.tunnels.get(tunnelId) !== ws) return;
     const metadata = this.tunnelMetadata.get(tunnelId);
+    clearTimeout(this.expiryTimers.get(tunnelId));
+    this.expiryTimers.delete(tunnelId);
     this.tunnels.delete(tunnelId);
     this.tunnelMetadata.delete(tunnelId);
-
-    for (const [requestId, req] of this.pendingRequests.entries()) {
+    for (const [requestId, req] of this.pendingRequests) {
       if (req.tunnelId === tunnelId) {
         clearTimeout(req.timeout);
         this.pendingRequests.delete(requestId);
         req.reject(new Error("Tunnel disconnected"));
       }
     }
+    await this.releaseTunnelState(tunnelId, ws, metadata);
+  }
 
-    if (this.redis) {
-      try {
-        await this.redis.del(this.redisKey(tunnelId));
-        if (metadata?.organizationId && metadata?.dbTunnelId) {
-          // Remove from online set and delete last_seen
-          await this.redis.srem(
-            `org:${metadata.organizationId}:online_tunnels`,
-            metadata.dbTunnelId,
-          );
-          await this.redis.del(`tunnel:last_seen:${metadata.dbTunnelId}`);
-          // Remove org from global index if no more online tunnels
-          const remaining = await this.redis.scard(
-            `org:${metadata.organizationId}:online_tunnels`,
-          );
-          if (remaining === 0) {
-            await this.redis.srem(
-              "global:orgs_with_online_tunnels",
-              metadata.organizationId,
-            );
-          }
-        }
-      } catch (error) {
-        console.error("Failed to remove tunnel reservation", error);
-      }
+  private async releaseTunnelState(tunnelId: string, ws: WebSocket, metadata?: TunnelMetadata): Promise<void> {
+    if (!this.redis) return;
+    try {
+      // One atomic release, guarded by connection identity. A delayed close on
+      // an old edge must not delete a replacement tunnel or its online status.
+      await this.redis.eval(`
+        local raw = redis.call('GET', KEYS[1])
+        if raw then
+          local ok, current = pcall(cjson.decode, raw)
+          if not ok or type(current) ~= 'table' or current.connectionId ~= ARGV[1] then return 0 end
+        end
+        redis.call('DEL', KEYS[1])
+        if ARGV[4] ~= '' and redis.call('GET', KEYS[5]) == ARGV[4] then redis.call('DEL', KEYS[5]) end
+        if ARGV[2] ~= '' and ARGV[3] ~= '' then
+          redis.call('SREM', KEYS[2], ARGV[3])
+          redis.call('DEL', KEYS[3])
+          if redis.call('SCARD', KEYS[2]) == 0 then
+            redis.call('SREM', KEYS[4], ARGV[2])
+          end
+        end
+        return 1
+      `, 5, this.redisKey(tunnelId), `org:${metadata?.organizationId}:online_tunnels`,
+      `tunnel:last_seen:${metadata?.dbTunnelId}`, "global:orgs_with_online_tunnels", metadata?.guestLeaseKey || "tunnel:guest:unused",
+      this.connectionId(ws), metadata?.organizationId || "", metadata?.dbTunnelId || "", metadata?.guestSessionId || "");
+    } catch (error) {
+      // The route and last_seen leases expire even when Redis is unavailable.
+      console.error("Failed to remove tunnel reservation", error);
     }
   }
 
@@ -184,80 +203,30 @@ export class TunnelRouter {
     metadata?: TunnelMetadata,
     forceTakeover = false,
   ): Promise<boolean> {
-    if (!this.redis) {
-      const canReserve = !this.tunnels.has(tunnelId);
-      if (canReserve) {
-        this.tunnels.set(tunnelId, ws);
-        if (metadata) {
-          this.tunnelMetadata.set(tunnelId, metadata);
-        }
-      }
-      return canReserve;
+    if (ws.readyState !== WebSocket.OPEN) return false;
+    const previous = this.tunnels.get(tunnelId);
+    const previousMetadata = this.tunnelMetadata.get(tunnelId);
+    if (!this.redis && previous && previous !== ws) {
+      const sameOwner = metadata?.userId && metadata.userId === previousMetadata?.userId &&
+        metadata.organizationId === previousMetadata?.organizationId;
+      if (previous.readyState === WebSocket.OPEN && !(forceTakeover && sameOwner)) return false;
     }
-
-    const persisted = await this.persistTunnelState(
-      tunnelId,
-      "NX",
-      metadata,
-      forceTakeover,
-    );
-    if (persisted) {
-      this.tunnels.set(tunnelId, ws);
-      if (metadata) {
-        this.tunnelMetadata.set(tunnelId, metadata);
-      }
+    if (!await this.persistTunnelState(tunnelId, "NX", ws, metadata, forceTakeover)) return false;
+    this.tunnels.set(tunnelId, ws);
+    if (metadata) this.tunnelMetadata.set(tunnelId, metadata);
+    this.scheduleExpiry(tunnelId, ws, metadata);
+    if (previous && previous !== ws) previous.terminate();
+    if (ws.readyState !== WebSocket.OPEN) {
+      await this.unregisterTunnel(tunnelId, ws);
+      return false;
     }
-    return persisted;
+    return true;
   }
 
   async shutdown(): Promise<void> {
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = undefined;
-    }
-
-    if (this.redis) {
-      const keys = Array.from(this.tunnels.keys()).map((id) =>
-        this.redisKey(id),
-      );
-      if (keys.length > 0) {
-        try {
-          await this.redis.del(...keys);
-
-          // Track orgs that need global index cleanup
-          const orgsToCheck = new Set<string>();
-
-          // Remove from organization online tunnels sets
-          const pipeline = this.redis.pipeline();
-          for (const [, metadata] of this.tunnelMetadata) {
-            if (metadata.organizationId && metadata.dbTunnelId) {
-              pipeline.srem(
-                `org:${metadata.organizationId}:online_tunnels`,
-                metadata.dbTunnelId,
-              );
-              pipeline.del(`tunnel:last_seen:${metadata.dbTunnelId}`);
-              orgsToCheck.add(metadata.organizationId);
-            }
-          }
-          await pipeline.exec();
-
-          // Cleanup global index for orgs with no remaining tunnels
-          for (const orgId of orgsToCheck) {
-            const remaining = await this.redis.scard(
-              `org:${orgId}:online_tunnels`,
-            );
-            if (remaining === 0) {
-              await this.redis.srem("global:orgs_with_online_tunnels", orgId);
-            }
-          }
-        } catch (error) {
-          console.error(
-            "Failed to clear tunnel reservations on shutdown",
-            error,
-          );
-        }
-      }
-    }
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = undefined;
+    await Promise.all(Array.from(this.tunnels, ([id, ws]) => this.unregisterTunnel(id, ws)));
   }
 
   getTunnelMetadata(tunnelId: string): TunnelMetadata | undefined {
@@ -265,17 +234,44 @@ export class TunnelRouter {
   }
 
   getTunnel(tunnelId: string): WebSocket | undefined {
-    return this.tunnels.get(tunnelId);
+    const ws = this.tunnels.get(tunnelId);
+    const expiresAt = this.tunnelMetadata.get(tunnelId)?.expiresAt;
+    if (ws && expiresAt !== undefined && Date.now() >= expiresAt) {
+      this.expireTunnel(tunnelId, ws);
+      return;
+    }
+    return ws;
   }
 
   hasTunnel(tunnelId: string): boolean {
-    return this.tunnels.has(tunnelId);
+    return this.getTunnel(tunnelId) !== undefined;
   }
 
-  handleMessage(tunnelId: string, message: Message): void {
+  private scheduleExpiry(tunnelId: string, ws: WebSocket, metadata?: TunnelMetadata): void {
+    clearTimeout(this.expiryTimers.get(tunnelId));
+    this.expiryTimers.delete(tunnelId);
+    if (metadata?.expiresAt === undefined) return;
+    const timer = setTimeout(() => this.expireTunnel(tunnelId, ws), Math.max(0, metadata.expiresAt - Date.now()));
+    timer.unref();
+    this.expiryTimers.set(tunnelId, timer);
+  }
+
+  private expireTunnel(tunnelId: string, ws: WebSocket): void {
+    if (this.tunnels.get(tunnelId) !== ws) return;
+    void this.unregisterTunnel(tunnelId, ws);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(Protocol.encode({ type: "error", code: "TUNNEL_EXPIRED", message: "Guest HTTP tunnels expire after 60 minutes. Run outray login for an authenticated tunnel." }));
+      ws.close(1008, "Guest tunnel expired");
+    } else {
+      ws.terminate();
+    }
+  }
+
+  handleMessage(tunnelId: string, message: Message, ws: WebSocket): void {
+    if (this.getTunnel(tunnelId) !== ws) return;
     if (message.type === "response") {
       const pending = this.pendingRequests.get(message.requestId);
-      if (pending) {
+      if (pending && pending.tunnelId === tunnelId) {
         clearTimeout(pending.timeout);
         this.pendingRequests.delete(message.requestId);
         pending.resolve(message);
@@ -290,7 +286,7 @@ export class TunnelRouter {
     headers: Record<string, string | string[]>,
     body?: string,
   ): Promise<ResponseMessage> {
-    const ws = this.tunnels.get(tunnelId);
+    const ws = this.getTunnel(tunnelId);
 
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       throw new Error("Tunnel not available");
@@ -331,152 +327,59 @@ export class TunnelRouter {
     return `tunnel:online:${tunnelId}`;
   }
 
+  private connectionId(ws: WebSocket): string {
+    let id = this.connectionIds.get(ws);
+    if (!id) { id = randomUUID(); this.connectionIds.set(ws, id); }
+    return id;
+  }
+
   private async persistTunnelState(
     tunnelId: string,
     mode: "NX" | "XX",
+    ws: WebSocket,
     metadata?: TunnelMetadata,
     forceTakeover = false,
   ): Promise<boolean> {
-    if (!this.redis) {
-      return true;
-    }
-
-    const redisValue = JSON.stringify({
-      serverId: this.serverId,
-      updatedAt: Date.now(),
-      ...metadata,
-    });
-
+    if (!this.redis) return true;
+    const value = JSON.stringify({ ...metadata, serverId: this.serverId,
+      connectionId: this.connectionId(ws), updatedAt: Date.now() });
     try {
-      const key = this.redisKey(tunnelId);
-
-      if (mode === "NX") {
-        const result = await this.redis.set(
-          key,
-          redisValue,
-          "EX",
-          this.ttlSeconds,
-          "NX",
-        );
-        if (result === "OK") {
-          // Add to org's online tunnels set using dbTunnelId
-          if (metadata?.organizationId && metadata?.dbTunnelId) {
-            await this.redis.sadd(
-              `org:${metadata.organizationId}:online_tunnels`,
-              metadata.dbTunnelId,
-            );
-            // Add org to global index for O(1) lookup
-            await this.redis.sadd(
-              "global:orgs_with_online_tunnels",
-              metadata.organizationId,
-            );
-            await this.redis.set(
-              `tunnel:last_seen:${metadata.dbTunnelId}`,
-              Date.now().toString(),
-              "EX",
-              this.ttlSeconds,
-            );
-          }
-          return true;
-        }
-
-        // If NX failed, check if we can take over
-        if (metadata?.userId) {
-          const existing = await this.redis.get(key);
-          if (existing) {
-            try {
-              const parsed = JSON.parse(existing);
-              if (parsed.userId === metadata.userId) {
-                // Same user
-                if (forceTakeover) {
-                  // Force takeover requested - close existing tunnel and take over
-                  if (this.tunnels.has(tunnelId)) {
-                    const existingWs = this.tunnels.get(tunnelId);
-                    existingWs?.close();
-                    this.tunnels.delete(tunnelId);
-                  }
-                  await this.redis.set(key, redisValue, "EX", this.ttlSeconds);
-                  if (metadata?.organizationId && metadata?.dbTunnelId) {
-                    await this.redis.sadd(
-                      `org:${metadata.organizationId}:online_tunnels`,
-                      metadata.dbTunnelId,
-                    );
-                    await this.redis.sadd(
-                      "global:orgs_with_online_tunnels",
-                      metadata.organizationId,
-                    );
-                    await this.redis.set(
-                      `tunnel:last_seen:${metadata.dbTunnelId}`,
-                      Date.now().toString(),
-                      "EX",
-                      this.ttlSeconds,
-                    );
-                  }
-                  return true;
-                } else if (!this.tunnels.has(tunnelId)) {
-                  // Tunnel is not active, allow takeover
-                  await this.redis.set(key, redisValue, "EX", this.ttlSeconds);
-                  if (metadata?.organizationId && metadata?.dbTunnelId) {
-                    await this.redis.sadd(
-                      `org:${metadata.organizationId}:online_tunnels`,
-                      metadata.dbTunnelId,
-                    );
-                    await this.redis.sadd(
-                      "global:orgs_with_online_tunnels",
-                      metadata.organizationId,
-                    );
-                    await this.redis.set(
-                      `tunnel:last_seen:${metadata.dbTunnelId}`,
-                      Date.now().toString(),
-                      "EX",
-                      this.ttlSeconds,
-                    );
-                  }
-                  return true;
-                }
-                // Tunnel is actively connected, deny takeover
-                return false;
-              }
-            } catch (e) {
-              // ignore parse error
-            }
-          }
-        }
-        return false;
-      } else {
-        // XX mode (heartbeat refresh)
-        const result = await this.redis.set(
-          key,
-          redisValue,
-          "EX",
-          this.ttlSeconds,
-          "XX",
-        );
-
-        if (result === null) {
-          return this.persistTunnelState(tunnelId, "NX", metadata);
-        }
-
-        // Add to online_tunnels SET and refresh last_seen timestamp
-        if (metadata?.organizationId && metadata?.dbTunnelId) {
-          await this.redis.sadd(
-            `org:${metadata.organizationId}:online_tunnels`,
-            metadata.dbTunnelId,
-          );
-          await this.redis.sadd(
-            "global:orgs_with_online_tunnels",
-            metadata.organizationId,
-          );
-          await this.redis.set(
-            `tunnel:last_seen:${metadata.dbTunnelId}`,
-            Date.now().toString(),
-            "EX",
-            this.ttlSeconds,
-          );
-        }
-
-        return true;
-      }
+      const result = await this.redis.eval(`
+        local raw = redis.call('GET', KEYS[1])
+        local incoming = cjson.decode(ARGV[1])
+        if raw then
+          local ok, current = pcall(cjson.decode, raw)
+          if not ok or type(current) ~= 'table' then return 0 end
+          if current.connectionId ~= incoming.connectionId then
+            if ARGV[3] ~= 'NX' or ARGV[4] ~= 'true' or
+              not incoming.userId or not incoming.organizationId or
+              current.userId ~= incoming.userId or current.organizationId ~= incoming.organizationId then
+              return 0
+            end
+          end
+        elseif ARGV[3] == 'XX' then
+          -- A closed/replaced/expired lease must never be resurrected by a heartbeat.
+          return 0
+        end
+        local leaseMs = tonumber(ARGV[2]) * 1000
+        if incoming.expiresAt then
+          local clock = redis.call('TIME')
+          local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
+          leaseMs = math.min(leaseMs, incoming.expiresAt - now)
+          if leaseMs <= 0 or not incoming.guestSessionId or redis.call('GET', KEYS[5]) ~= incoming.guestSessionId then return 0 end
+          redis.call('PEXPIRE', KEYS[5], leaseMs)
+        end
+        redis.call('SET', KEYS[1], ARGV[1], 'PX', leaseMs)
+        if incoming.organizationId and incoming.dbTunnelId then
+          redis.call('SADD', KEYS[2], incoming.dbTunnelId)
+          redis.call('SADD', KEYS[4], incoming.organizationId)
+          redis.call('SET', KEYS[3], ARGV[5], 'EX', ARGV[2])
+        end
+        return 1
+      `, 5, this.redisKey(tunnelId), `org:${metadata?.organizationId}:online_tunnels`,
+      `tunnel:last_seen:${metadata?.dbTunnelId}`, "global:orgs_with_online_tunnels", metadata?.guestLeaseKey || "tunnel:guest:unused",
+      value, this.ttlSeconds, mode, String(forceTakeover), Date.now());
+      return result === 1;
     } catch (error) {
       console.error("Failed to persist tunnel state", error);
       return false;
@@ -494,15 +397,23 @@ export class TunnelRouter {
   }
 
   private async refreshActiveTunnels(): Promise<void> {
-    if (!this.redis || this.tunnels.size === 0) {
-      return;
-    }
-
-    await Promise.all(
-      Array.from(this.tunnels.keys()).map((tunnelId) => {
+    if (this.refreshing) return;
+    this.refreshing = true;
+    try {
+      await Promise.all(Array.from(this.tunnels, async ([tunnelId, ws]) => {
         const metadata = this.tunnelMetadata.get(tunnelId);
-        return this.persistTunnelState(tunnelId, "XX", metadata);
-      }),
-    );
+        if (metadata?.expiresAt !== undefined && Date.now() >= metadata.expiresAt) {
+          this.expireTunnel(tunnelId, ws);
+          return;
+        }
+        if (ws.readyState !== WebSocket.OPEN ||
+            !await this.persistTunnelState(tunnelId, "XX", ws, this.tunnelMetadata.get(tunnelId))) {
+          await this.unregisterTunnel(tunnelId, ws);
+          ws.terminate();
+        }
+      }));
+    } finally {
+      this.refreshing = false;
+    }
   }
 }

@@ -1,6 +1,6 @@
 import WebSocket, { WebSocketServer } from "ws";
-import { Server as HTTPServer } from "http";
-import { TunnelRouter } from "./TunnelRouter";
+import type { IncomingMessage } from "node:http";
+import { TunnelRouter, type TunnelMetadata } from "./TunnelRouter";
 import { TCPProxy } from "./TCPProxy";
 import { UDPProxy } from "./UDPProxy";
 import {
@@ -15,10 +15,12 @@ import {
 } from "./Protocol";
 import { WSProxy } from "./WSProxy";
 
-import { generateId, generateSubdomain } from "../../../../shared/utils";
+import { generateSubdomain } from "../../../../shared/utils";
 import { config } from "../config";
 import { randomUUID } from "node:crypto";
+import { GuestTunnelLimits, guestClientIp, type GuestLease } from "../lib/guest-tunnels";
 import { recordTunnelOpening } from "../lib/product-usage";
+import { withTunnelReservationLock, TunnelReservationBusyError } from "../../../../shared/tunnel-reservation-lock";
 
 export class WSHandler {
   private wss: WebSocketServer;
@@ -27,9 +29,9 @@ export class WSHandler {
   private udpProxy: UDPProxy;
   private wsProxy: WSProxy | null;
   private webApiUrl: string;
+  private guestLimits: GuestTunnelLimits;
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private readonly HEARTBEAT_INTERVAL_MS = 30000; // 30 seconds
-  private readonly HEARTBEAT_TIMEOUT_MS = 35000; // 35 seconds (slightly longer than interval)
 
   constructor(
     wss: WebSocketServer,
@@ -39,6 +41,7 @@ export class WSHandler {
     wsProxy?: WSProxy,
   ) {
     this.router = router;
+    this.guestLimits = new GuestTunnelLimits(router.getRedis(), Math.max(30, config.redisTunnelTtlSeconds) * 1000);
     this.wss = wss;
     this.tcpProxy = tcpProxy || new TCPProxy();
     this.udpProxy = udpProxy || new UDPProxy();
@@ -101,6 +104,7 @@ export class WSHandler {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token }),
       });
+      if (!response.ok) return { valid: false, error: "Authentication failed" };
       return (await response.json()) as {
         valid: boolean;
         userId?: string;
@@ -126,6 +130,7 @@ export class WSHandler {
     allowed: boolean;
     type?: "owned" | "available";
     error?: string;
+    code?: string;
   }> {
     try {
       const response = await fetch(`${this.webApiUrl}/tunnel/check-subdomain`, {
@@ -133,6 +138,7 @@ export class WSHandler {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ subdomain, organizationId }),
       });
+      if (!response.ok) return { allowed: false, error: "Subdomain check failed" };
       return (await response.json()) as {
         allowed: boolean;
         type?: "owned" | "available";
@@ -141,6 +147,30 @@ export class WSHandler {
     } catch (error) {
       console.error("Failed to check subdomain:", error);
       return { allowed: false, error: "Internal server error" };
+    }
+  }
+
+  private async reserveSubdomain(
+    subdomain: string,
+    ws: WebSocket,
+    metadata: TunnelMetadata,
+    forceTakeover = false,
+  ): Promise<{ reserved: boolean; code?: string; error?: string }> {
+    const hostname = `${subdomain}.${config.baseDomain}`;
+    try {
+      return await withTunnelReservationLock(this.router.getRedis(), hostname, async (assertHeld) => {
+        const check = await this.checkSubdomain(subdomain, metadata.organizationId);
+        if (check.allowed !== true) return { reserved: false, code: check.code || "SUBDOMAIN_DENIED", error: check.error };
+        if (ws.readyState !== WebSocket.OPEN) return { reserved: false };
+        await assertHeld();
+        const reserved = await this.router.reserveTunnel(hostname, ws, metadata, forceTakeover);
+        return { reserved, code: "SUBDOMAIN_IN_USE", error: `Subdomain ${subdomain} is currently in use.` };
+      });
+    } catch (error) {
+      if (error instanceof TunnelReservationBusyError) {
+        return { reserved: false, code: "SUBDOMAIN_IN_USE", error: error.message };
+      }
+      throw error;
     }
   }
 
@@ -183,7 +213,7 @@ export class WSHandler {
         tunnelId?: string;
       };
       return {
-        success: true,
+        success: data.success === true && typeof data.tunnelId === "string" && data.tunnelId.length > 0,
         tunnelId: data.tunnelId,
       };
     } catch (error) {
@@ -220,7 +250,7 @@ export class WSHandler {
   }
 
   private setupWebSocketServer(): void {
-    this.wss.on("connection", (ws: WebSocket) => {
+    this.wss.on("connection", (ws: WebSocket, request: IncomingMessage) => {
       // Extend WebSocket with heartbeat tracking
       const extWs = ws as WebSocket & { isAlive: boolean; tunnelId?: string };
       extWs.isAlive = true;
@@ -231,54 +261,91 @@ export class WSHandler {
       });
 
       let tunnelId: string | null = null;
+      let activeProtocol: "http" | "tcp" | "udp" | undefined;
+      let opening = false;
+      let closed = false;
+      let guestLease: GuestLease | undefined;
+      const allocated = new Set<string>();
+      const cleanup = async () => {
+        if (opening) return;
+        for (const id of allocated) {
+          allocated.delete(id);
+          try {
+            if (this.tcpProxy.hasTunnel(id)) await this.tcpProxy.closeTunnel(id);
+            if (this.udpProxy.hasTunnel(id)) await this.udpProxy.closeTunnel(id);
+            this.wsProxy?.cleanupTunnel(id, ws);
+          } finally {
+            await this.router.unregisterTunnel(id, ws);
+          }
+        }
+        if (guestLease) await this.guestLimits.release(guestLease);
+      };
       const usageSessionId = randomUUID();
       let usageOpenedAt: string | undefined;
       let usageRecorded = false;
       const countOpening = async (organizationId: string | undefined, protocol: "http" | "tcp" | "udp") => {
-        if (usageRecorded) return;
+        if (!organizationId || usageRecorded) return;
         usageOpenedAt ??= new Date().toISOString();
         await recordTunnelOpening(organizationId, protocol, usageSessionId, usageOpenedAt);
         usageRecorded = true;
       };
 
       ws.on("message", async (data: WebSocket.Data) => {
+        let ownsOpening = false;
         try {
           const message = Protocol.decode(data.toString()) as Message;
+          if (guestLease && Date.now() >= guestLease.expiresAt) {
+            ws.close(1008, "Guest tunnel expired");
+            return;
+          }
 
           if (message.type === "hello") {
             console.log(`Client connected: ${message.clientId}`);
           } else if (message.type === "open_tunnel") {
-            let organizationId: string | undefined;
-            let userId: string | undefined;
-            let bandwidthLimit: number | undefined;
-            let retentionDays: number | undefined;
-            let plan: string | undefined;
-            let fullCaptureEnabled: boolean | undefined;
-
-            if (message.apiKey) {
-              const authResult = await this.validateAuthToken(message.apiKey);
-              if (!authResult.valid) {
-                console.log(`Invalid Auth Token: ${authResult.error}`);
-                ws.send(
-                  Protocol.encode({
-                    type: "error",
-                    code: "AUTH_FAILED",
-                    message: authResult.error || "Authentication failed",
-                  }),
-                );
-                ws.close();
+            // One allocation per socket, including while authentication is pending.
+            if (opening || tunnelId || closed) {
+              ws.close(1008, "Only one tunnel is allowed per connection");
+              return;
+            }
+            opening = true;
+            ownsOpening = true;
+            const tunnelProtocol = message.protocol ?? "http";
+            if (!["http", "tcp", "udp"].includes(tunnelProtocol)) {
+              ws.send(Protocol.encode({ type: "error", code: "INVALID_PROTOCOL", message: "Unsupported tunnel protocol" }));
+              ws.close(1008, "Unsupported tunnel protocol");
+              return;
+            }
+            let identity: Awaited<ReturnType<WSHandler["validateAuthToken"]>> = { valid: false };
+            if (message.apiKey !== undefined) {
+              if (typeof message.apiKey !== "string" || !message.apiKey.trim() || message.apiKey.length > 512) {
+                ws.send(Protocol.encode({ type: "error", code: "AUTH_FAILED", message: "Invalid authentication credential" }));
+                ws.close(1008, "Authentication failed");
                 return;
               }
-              organizationId = authResult.organizationId;
-              userId = authResult.userId;
-              bandwidthLimit = authResult.bandwidthLimit;
-              retentionDays = authResult.retentionDays;
-              plan = authResult.plan;
-              fullCaptureEnabled = authResult.fullCaptureEnabled;
-              console.log(
-                `Authenticated organization: ${authResult.organization?.name}`,
-              );
+              identity = await this.validateAuthToken(message.apiKey);
+              if (identity?.valid !== true || typeof identity.organizationId !== "string" || !identity.organizationId.trim()) {
+                ws.send(Protocol.encode({ type: "error", code: "AUTH_FAILED", message: identity?.error || "Authentication failed" }));
+                ws.close(1008, "Authentication failed");
+                return;
+              }
+            } else {
+              if (tunnelProtocol !== "http" || message.customDomain || message.password || message.forceTakeover) {
+                ws.send(Protocol.encode({ type: "error", code: "AUTH_REQUIRED", message: "Authentication required for this tunnel feature" }));
+                ws.close(1008, "Authentication required");
+                return;
+              }
+              const ip = guestClientIp(request, config.tunnelTrustedProxyIps);
+              if (!ip) throw new Error("Guest client address unavailable");
+              guestLease = await this.guestLimits.admit(ip);
+              if (!guestLease) {
+                ws.send(Protocol.encode({ type: "error", code: "RATE_LIMITED", message: "Guest limit reached: one active HTTP tunnel per IP and five starts per minute. Try later or run outray login." }));
+                ws.close(1008, "Guest tunnel limit reached");
+                return;
+              }
             }
+            if (closed || ws.readyState !== WebSocket.OPEN) return;
+            activeProtocol = tunnelProtocol;
+            const { organizationId, userId, bandwidthLimit, retentionDays, plan, fullCaptureEnabled } = identity;
 
             // Gate password protection: only paid plans can use --password
             if (message.password && (!plan || plan === "free")) {
@@ -294,181 +361,41 @@ export class WSHandler {
               return;
             }
 
-            const tunnelProtocol = message.protocol || "http";
             if (tunnelProtocol === "tcp" || tunnelProtocol === "udp") {
-              if (!organizationId) {
-                ws.send(
-                  Protocol.encode({
-                    type: "error",
-                    code: "AUTH_REQUIRED",
-                    message: "Authentication required for TCP/UDP tunnels",
-                  }),
-                );
+              const proxy = tunnelProtocol === "tcp" ? this.tcpProxy : this.udpProxy;
+              const tunnelName = generateSubdomain();
+              allocated.add(tunnelName);
+              const result = await proxy.createTunnel(tunnelName, ws, organizationId!, message.remotePort, bandwidthLimit);
+              if (!result.success) {
+                ws.send(Protocol.encode({ type: "error", code: "TUNNEL_UNAVAILABLE", message: result.error || "Failed to create tunnel" }));
                 ws.close();
                 return;
               }
-
-              const tunnelName = generateSubdomain();
-              const tunnelIdForProtocol = tunnelName;
-
-              if (tunnelProtocol === "tcp") {
-                const result = await this.tcpProxy.createTunnel(
-                  tunnelIdForProtocol,
-                  ws,
-                  organizationId || "",
-                  message.remotePort,
-                  bandwidthLimit,
-                );
-
-                if (!result.success) {
-                  ws.send(
-                    Protocol.encode({
-                      type: "error",
-                      code: "TCP_TUNNEL_FAILED",
-                      message: result.error || "Failed to create TCP tunnel",
-                    }),
-                  );
-                  ws.close();
-                  return;
-                }
-
-                // Register tunnel in database first to get dbTunnelId
-                let dbTunnelId: string | undefined;
-                if (organizationId) {
-                  const dbResult = await this.registerTunnelInDatabase(
-                    userId,
-                    organizationId,
-                    `tcp://${tunnelName}.${config.baseDomain}:${result.port}`,
-                    {
-                      protocol: "tcp",
-                      remotePort: result.port,
-                      tunnelId: tunnelIdForProtocol,
-                      name: tunnelName,
-                    },
-                  );
-                  if (!dbResult.success) {
-                    console.error(
-                      `Failed to register TCP tunnel in database: ${dbResult.error}`,
-                    );
-                  } else {
-                    dbTunnelId = dbResult.tunnelId;
-                    // Set the dbTunnelId on the TCP proxy for logging
-                    if (dbTunnelId) {
-                      this.tcpProxy.setDbTunnelId(
-                        tunnelIdForProtocol,
-                        dbTunnelId,
-                      );
-                    }
-                  }
-                }
-
-                // Reserve tunnel in Redis for routing (with dbTunnelId for online tracking)
-                await this.router.reserveTunnel(tunnelIdForProtocol, ws, {
-                  organizationId,
-                  userId,
-                  dbTunnelId,
-                  bandwidthLimit,
-                  retentionDays,
-                  fullCaptureEnabled,
-                  password: message.password,
-                });
-
-                tunnelId = tunnelIdForProtocol;
-                extWs.tunnelId = tunnelIdForProtocol; // Track for heartbeat logging
-                await countOpening(organizationId, "tcp");
-                ws.send(
-                  Protocol.encode({
-                    type: "tunnel_opened",
-                    tunnelId: tunnelIdForProtocol,
-                    url: `tcp://${tunnelName}.${config.baseDomain}:${result.port}`,
-                    protocol: "tcp",
-                    port: result.port,
-                    plan,
-                  }),
-                );
-                console.log(
-                  `TCP tunnel opened: ${tunnelIdForProtocol} on port ${result.port}`,
-                );
-              } else {
-                // UDP
-                const result = await this.udpProxy.createTunnel(
-                  tunnelIdForProtocol,
-                  ws,
-                  organizationId || "",
-                  message.remotePort,
-                  bandwidthLimit,
-                );
-
-                if (!result.success) {
-                  ws.send(
-                    Protocol.encode({
-                      type: "error",
-                      code: "UDP_TUNNEL_FAILED",
-                      message: result.error || "Failed to create UDP tunnel",
-                    }),
-                  );
-                  ws.close();
-                  return;
-                }
-
-                // Register tunnel in database first to get dbTunnelId
-                let dbTunnelId: string | undefined;
-                if (organizationId) {
-                  const dbResult = await this.registerTunnelInDatabase(
-                    userId,
-                    organizationId,
-                    `udp://${tunnelName}.${config.baseDomain}:${result.port}`,
-                    {
-                      protocol: "udp",
-                      remotePort: result.port,
-                      tunnelId: tunnelIdForProtocol,
-                      name: tunnelName,
-                    },
-                  );
-                  if (!dbResult.success) {
-                    console.error(
-                      `Failed to register UDP tunnel in database: ${dbResult.error}`,
-                    );
-                  } else {
-                    dbTunnelId = dbResult.tunnelId;
-                    // Set the dbTunnelId on the UDP proxy for logging
-                    if (dbTunnelId) {
-                      this.udpProxy.setDbTunnelId(
-                        tunnelIdForProtocol,
-                        dbTunnelId,
-                      );
-                    }
-                  }
-                }
-
-                // Reserve tunnel in Redis for routing (with dbTunnelId for online tracking)
-                await this.router.reserveTunnel(tunnelIdForProtocol, ws, {
-                  organizationId,
-                  userId,
-                  dbTunnelId,
-                  bandwidthLimit,
-                  retentionDays,
-                  fullCaptureEnabled,
-                  password: message.password,
-                });
-
-                tunnelId = tunnelIdForProtocol;
-                extWs.tunnelId = tunnelIdForProtocol; // Track for heartbeat logging
-                await countOpening(organizationId, "udp");
-                ws.send(
-                  Protocol.encode({
-                    type: "tunnel_opened",
-                    tunnelId: tunnelIdForProtocol,
-                    url: `udp://${tunnelName}.${config.baseDomain}:${result.port}`,
-                    protocol: "udp",
-                    port: result.port,
-                    plan,
-                  }),
-                );
-                console.log(
-                  `UDP tunnel opened: ${tunnelIdForProtocol} on port ${result.port}`,
-                );
+              const metadata = { organizationId, userId, bandwidthLimit, retentionDays, plan, fullCaptureEnabled };
+              if (!await this.router.reserveTunnel(tunnelName, ws, metadata)) {
+                ws.close(1011, "Unable to persist tunnel reservation");
+                return;
               }
+              const url = `${tunnelProtocol}://${tunnelName}.${config.baseDomain}:${result.port}`;
+              const dbResult = await this.registerTunnelInDatabase(userId, organizationId!, url, {
+                protocol: tunnelProtocol, remotePort: result.port, tunnelId: tunnelName, name: tunnelName,
+              });
+              if (!dbResult.success || !dbResult.tunnelId) {
+                ws.send(Protocol.encode({ type: "error", code: "REGISTRATION_FAILED", message: dbResult.error || "Failed to register tunnel" }));
+                ws.close();
+                return;
+              }
+              proxy.setDbTunnelId(tunnelName, dbResult.tunnelId);
+              const reserved = await this.router.registerTunnel(tunnelName, ws, { ...metadata, dbTunnelId: dbResult.tunnelId });
+              if (!reserved) {
+                ws.close(1011, "Unable to persist tunnel reservation");
+                return;
+              }
+              tunnelId = tunnelName;
+              extWs.tunnelId = tunnelName;
+              await countOpening(organizationId, tunnelProtocol);
+              if (closed || ws.readyState !== WebSocket.OPEN) return;
+              ws.send(Protocol.encode({ type: "tunnel_opened", tunnelId, url, protocol: tunnelProtocol, port: result.port, plan }));
               return;
             }
 
@@ -508,6 +435,14 @@ export class WSHandler {
               tunnelId = message.customDomain;
               extWs.tunnelId = message.customDomain; // Track for heartbeat logging
               const tunnelUrl = `https://${message.customDomain}`;
+              allocated.add(message.customDomain);
+              if (!await this.router.reserveTunnel(message.customDomain, ws, {
+                organizationId, userId, bandwidthLimit, retentionDays, plan, fullCaptureEnabled, password: message.password,
+              }, message.forceTakeover || false)) {
+                ws.send(Protocol.encode({ type: "error", code: "DOMAIN_IN_USE", message: "Custom domain is already in use" }));
+                ws.close();
+                return;
+              }
 
               // Register tunnel in database and check limits
               let dbTunnelId: string | undefined;
@@ -520,7 +455,7 @@ export class WSHandler {
                     name: message.customDomain,
                   },
                 );
-                if (!result.success) {
+                if (!result.success || !result.tunnelId) {
                   ws.send(
                     Protocol.encode({
                       type: "error",
@@ -535,7 +470,7 @@ export class WSHandler {
               }
 
               const registered = await this.router.registerTunnel(
-                tunnelId,
+                message.customDomain,
                 ws,
                 {
                   organizationId,
@@ -561,6 +496,7 @@ export class WSHandler {
               }
 
               await countOpening(organizationId, "http");
+              if (closed || ws.readyState !== WebSocket.OPEN) return;
               ws.send(
                 Protocol.encode({
                   type: "tunnel_opened",
@@ -576,109 +512,30 @@ export class WSHandler {
             let requestedSubdomain = message.subdomain;
             let reservationAcquired = false;
 
-            console.log(
-              `Requested subdomain from client: ${requestedSubdomain}`,
-            );
-            console.log(`Organization ID: ${organizationId}`);
-
+            const reserve = async (subdomain: string) => {
+              allocated.add(`${subdomain}.${config.baseDomain}`);
+              const result = await this.reserveSubdomain(subdomain, ws, {
+                organizationId, userId, bandwidthLimit, retentionDays, fullCaptureEnabled,
+                ...guestLease, password: message.password,
+              }, message.forceTakeover || false);
+              return result;
+            };
             if (requestedSubdomain) {
-              const check = await this.checkSubdomain(
-                requestedSubdomain,
-                organizationId,
-              );
-
-              console.log(`Subdomain check result:`, check);
-
-              if (!check.allowed) {
-                console.log(`Subdomain denied: ${check.error}`);
-                ws.send(
-                  Protocol.encode({
-                    type: "error",
-                    code: "SUBDOMAIN_DENIED",
-                    message: check.error || "Subdomain not available",
-                  }),
-                );
+              const result = await reserve(requestedSubdomain);
+              if (!result.reserved) {
+                ws.send(Protocol.encode({ type: "error", code: result.code || "TUNNEL_UNAVAILABLE", message: result.error || "Tunnel address unavailable" }));
                 ws.close();
                 return;
-              } else {
-                console.log(`Subdomain check passed: ${check.type}`);
-                // Use full hostname for reservation to match later usage
-                const fullHostname = `${requestedSubdomain}.${config.baseDomain}`;
-                reservationAcquired = await this.router.reserveTunnel(
-                  fullHostname,
-                  ws,
-                  {
-                    organizationId,
-                    userId,
-                    bandwidthLimit,
-                    retentionDays,
-                    fullCaptureEnabled,
-                    password: message.password,
-                  },
-                  message.forceTakeover || false,
-                );
-
-                if (!reservationAcquired) {
-                  console.log(
-                    `Subdomain ${requestedSubdomain} is currently in use by another tunnel.`,
-                  );
-                  ws.send(
-                    Protocol.encode({
-                      type: "error",
-                      code: "SUBDOMAIN_IN_USE",
-                      message: `Subdomain ${requestedSubdomain} is currently in use. Please try again or use a different subdomain.`,
-                    }),
-                  );
-                  ws.close();
-                  return;
-                }
               }
-            }
-
-            if (!reservationAcquired) {
-              let attempts = 0;
-              while (!reservationAcquired && attempts < 5) {
-                const candidate = generateSubdomain();
-                const check = await this.checkSubdomain(candidate);
-                if (check.allowed) {
-                  const fullHostname = `${candidate}.${config.baseDomain}`;
-                  reservationAcquired = await this.router.reserveTunnel(
-                    fullHostname,
-                    ws,
-                    {
-                      organizationId,
-                      userId,
-                      bandwidthLimit,
-                      retentionDays,
-                      fullCaptureEnabled,
-                      password: message.password,
-                    },
-                  );
-                  if (reservationAcquired) {
-                    requestedSubdomain = candidate;
-                    break;
-                  }
-                }
-                attempts++;
-              }
-
-              if (!reservationAcquired) {
-                const fallback = generateId("tunnel");
-                const fullHostname = `${fallback}.${config.baseDomain}`;
-                reservationAcquired = await this.router.reserveTunnel(
-                  fullHostname,
-                  ws,
-                  {
-                    organizationId,
-                    userId,
-                    bandwidthLimit,
-                    retentionDays,
-                    fullCaptureEnabled,
-                    password: message.password,
-                  },
-                );
-                if (reservationAcquired) {
-                  requestedSubdomain = fallback;
+              reservationAcquired = true;
+            } else {
+              for (let attempt = 0; attempt < 6 && !closed; attempt++) {
+                const candidate = attempt === 5 ? `tunnel-${randomUUID()}` : generateSubdomain();
+                const result = await reserve(candidate);
+                if (result.reserved) {
+                  requestedSubdomain = candidate;
+                  reservationAcquired = true;
+                  break;
                 }
               }
             }
@@ -717,28 +574,7 @@ export class WSHandler {
                   name: requestedSubdomain,
                 },
               );
-              if (!result.success) {
-                // Remove the reserved tunnel from Redis since we're rejecting it
-                const redis = this.router.getRedis();
-                if (redis && organizationId && result.tunnelId) {
-                  await redis.srem(
-                    `org:${organizationId}:online_tunnels`,
-                    result.tunnelId,
-                  );
-                  await redis.del(`tunnel:last_seen:${result.tunnelId}`);
-                  await redis.del(`tunnel:online:${fullHostname}`);
-                  // Remove org from global index if no more online tunnels
-                  const remaining = await redis.scard(
-                    `org:${organizationId}:online_tunnels`,
-                  );
-                  if (remaining === 0) {
-                    await redis.srem(
-                      "global:orgs_with_online_tunnels",
-                      organizationId,
-                    );
-                  }
-                }
-
+              if (!result.success || !result.tunnelId) {
                 ws.send(
                   Protocol.encode({
                     type: "error",
@@ -760,6 +596,7 @@ export class WSHandler {
                 organizationId,
                 userId,
                 dbTunnelId,
+                ...guestLease,
                 bandwidthLimit,
                 retentionDays,
                 plan,
@@ -794,53 +631,50 @@ export class WSHandler {
             });
 
             await countOpening(organizationId, "http");
+            if (closed || ws.readyState !== WebSocket.OPEN) return;
             ws.send(response);
             console.log(`Tunnel opened: ${fullHostname}`);
-          } else if (message.type === "tcp_data" && tunnelId) {
+          } else if (message.type === "tcp_data" && tunnelId && activeProtocol === "tcp") {
             // Handle TCP data from client (response to external connection)
             const tcpMessage = message as TCPDataMessage;
             const data = Buffer.from(tcpMessage.data, "base64");
             this.tcpProxy.handleClientData(tcpMessage.connectionId, data);
-          } else if (message.type === "tcp_close" && tunnelId) {
+          } else if (message.type === "tcp_close" && tunnelId && activeProtocol === "tcp") {
             // Handle TCP close from client
             const tcpMessage = message as TCPCloseMessage;
             this.tcpProxy.handleClientClose(tcpMessage.connectionId);
-          } else if (message.type === "udp_response" && tunnelId) {
+          } else if (message.type === "udp_response" && tunnelId && activeProtocol === "udp") {
             // Handle UDP response from client
             const udpMessage = message as UDPResponseMessage;
             this.udpProxy.handleClientResponse(udpMessage);
           } else if (message.type === "ws_upgrade_response" && tunnelId && this.wsProxy) {
             // Handle WebSocket upgrade response from client
-            this.wsProxy.handleUpgradeResponse(message as WSUpgradeResponseMessage);
+            this.wsProxy.handleUpgradeResponse(message as WSUpgradeResponseMessage, ws);
           } else if (message.type === "ws_frame" && tunnelId && this.wsProxy) {
             // Handle WebSocket frame from client's local WS
-            this.wsProxy.handleFrame(message as WSFrameMessage);
+            this.wsProxy.handleFrame(message as WSFrameMessage, ws);
           } else if (message.type === "ws_close" && tunnelId && this.wsProxy) {
             // Handle WebSocket close from client's local WS
-            this.wsProxy.handleClose(message as WSCloseMessage);
+            this.wsProxy.handleClose(message as WSCloseMessage, ws);
           } else if (tunnelId) {
-            this.router.handleMessage(tunnelId, message);
+            this.router.handleMessage(tunnelId, message, ws);
           }
         } catch (error) {
           console.error("WebSocket message error:", error);
+          ws.close(1011, "Tunnel operation failed");
+        } finally {
+          if (ownsOpening) opening = false;
+          if (closed || ws.readyState !== WebSocket.OPEN) {
+            await cleanup().catch((error) => console.error("Tunnel cleanup failed:", error));
+          }
         }
       });
 
-      ws.on("close", (code, reason) => {
-        if (tunnelId) {
-          // Clean up TCP/UDP tunnels if they exist
-          if (this.tcpProxy.hasTunnel(tunnelId)) {
-            void this.tcpProxy.closeTunnel(tunnelId);
-          }
-          if (this.udpProxy.hasTunnel(tunnelId)) {
-            void this.udpProxy.closeTunnel(tunnelId);
-          }
-          void this.router.unregisterTunnel(tunnelId, ws);
-          console.log(
-            `Tunnel closed: ${tunnelId} (Code: ${code}, Reason: ${reason})`,
-          );
-          tunnelId = null;
-        }
+      ws.on("close", () => {
+        closed = true;
+        tunnelId = null;
+        if (guestLease) void this.guestLimits.release(guestLease).catch((error) => console.error("Guest cleanup failed:", error));
+        void cleanup().catch((error) => console.error("Tunnel cleanup failed:", error));
       });
 
       ws.on("error", (error) => {

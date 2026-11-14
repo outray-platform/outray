@@ -4,6 +4,7 @@ export const config = {
   port: parseInt(process.env.TUNNEL_PORT || process.env.PORT || "3547", 10),
   bindHost: process.env.TUNNEL_BIND_HOST || "0.0.0.0",
   baseDomain: process.env.BASE_DOMAIN || "localhost.direct",
+  tunnelTrustedProxyIps: (process.env.TUNNEL_TRUSTED_PROXY_IPS ?? process.env.STATUS_TRUSTED_PROXY_IPS ?? "127.0.0.1,::1").split(",").map(value => value.trim()).filter(Boolean),
   redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
   redisTunnelTtlSeconds: parseInt(
     process.env.REDIS_TUNNEL_TTL_SECONDS || "120",

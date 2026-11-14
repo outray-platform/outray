@@ -6,13 +6,14 @@ Share your local server with a secure public URL. Test webhooks, preview your wo
 
 ## Get started
 
-Install the CLI, sign in, and expose your local app:
+Install the CLI and expose your local app:
 
 ```sh
 npm install -g outray
-outray login
 outray 3000
 ```
+
+Without saved credentials, HTTP tunnels run as guests for up to 60 minutes, with one active tunnel per IP and five starts per minute. Run `outray login` to use organization tunnels, reserved subdomains, custom domains, TCP, or UDP. An available, unreserved HTTP subdomain can also be used for a guest session.
 
 OutRay gives you a public HTTPS address that forwards requests to `localhost:3000`. WebSocket connections are supported too.
 

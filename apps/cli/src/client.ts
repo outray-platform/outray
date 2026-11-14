@@ -236,6 +236,11 @@ export class OutRayClient {
       } else if (message.type === "error") {
         if (message.code === "SUBDOMAIN_IN_USE") {
           if (this.assignedUrl) {
+            if (!this.apiKey) {
+              console.log(chalk.red(`Guest address is in use: ${message.message}`));
+              this.stop();
+              process.exit(1);
+            }
             // If we're reconnecting and the subdomain is in use, it's likely our own
             // zombie connection from the drop. Try to force takeover once.
             if (!this.forceTakeover) {
@@ -272,7 +277,7 @@ export class OutRayClient {
             // Subdomain conflict but we already handled it, just log
             console.log(chalk.red(`❌ Error: ${message.message}`));
           }
-        } else if (message.code === "AUTH_FAILED") {
+        } else if (["AUTH_FAILED", "AUTH_REQUIRED", "TUNNEL_EXPIRED", "RATE_LIMITED"].includes(message.code)) {
           console.log(chalk.red(`❌ Error: ${message.message}`));
           this.shouldReconnect = false;
           this.stop();
@@ -593,6 +598,11 @@ export class OutRayClient {
   private handleClose(code?: number, reason?: Buffer): void {
     this.stopPing();
     this.stopPongTimeout();
+    if (code === 1008) {
+      console.log(chalk.dim(`Tunnel ended: ${reason?.toString() || "server policy"}`));
+      this.stop();
+      return;
+    }
     if (!this.shouldReconnect) return;
 
     const reasonStr = reason?.toString() || "";
@@ -614,7 +624,7 @@ export class OutRayClient {
     // If we previously had a tunnel URL, assume the existing session may still
     // be active on the server (e.g., after sleep). Force takeover on the next
     // handshake to reclaim it.
-    if (this.assignedUrl) {
+    if (this.assignedUrl && this.apiKey) {
       this.forceTakeover = true;
     }
 
