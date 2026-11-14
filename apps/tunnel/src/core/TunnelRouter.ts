@@ -267,7 +267,8 @@ export class TunnelRouter {
     }
   }
 
-  handleMessage(tunnelId: string, message: Message): void {
+  handleMessage(tunnelId: string, message: Message, ws: WebSocket): void {
+    if (this.getTunnel(tunnelId) !== ws) return;
     if (message.type === "response") {
       const pending = this.pendingRequests.get(message.requestId);
       if (pending && pending.tunnelId === tunnelId) {

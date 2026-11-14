@@ -116,3 +116,21 @@ test("another control socket cannot inject or close a guest WebSocket stream", (
   proxy.handleFrame(frame, owner as WebSocket);
   assert.deepEqual(delivered, ["content"]);
 });
+
+test("a replaced control socket cannot answer HTTP requests for its old address", async () => {
+  const router = new TunnelRouter();
+  const first = { readyState: WebSocket.OPEN as number, send() {}, terminate() { this.readyState = WebSocket.CLOSED; } } as unknown as WebSocket;
+  let requestId = "";
+  const current = { readyState: WebSocket.OPEN, send(data: string) { requestId = JSON.parse(data).requestId; }, terminate() {} } as unknown as WebSocket;
+  const metadata = { userId: "same-user", organizationId: "same-org" };
+  const hostname = "replace.example.test";
+  await router.reserveTunnel(hostname, first, metadata);
+  await router.reserveTunnel(hostname, current, metadata, true);
+  const pending = router.forwardRequest(hostname, "GET", "/", {});
+  const response = { type: "response" as const, requestId, statusCode: 200, headers: {}, body: "old-socket" };
+  router.handleMessage(hostname, response, first);
+  assert.ok(Reflect.get(router, "pendingRequests").has(requestId));
+  router.handleMessage(hostname, { ...response, body: "current-socket" }, current);
+  assert.equal((await pending).body, "current-socket");
+  await router.shutdown();
+});

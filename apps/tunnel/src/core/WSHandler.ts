@@ -657,7 +657,7 @@ export class WSHandler {
             // Handle WebSocket close from client's local WS
             this.wsProxy.handleClose(message as WSCloseMessage, ws);
           } else if (tunnelId) {
-            this.router.handleMessage(tunnelId, message);
+            this.router.handleMessage(tunnelId, message, ws);
           }
         } catch (error) {
           console.error("WebSocket message error:", error);
