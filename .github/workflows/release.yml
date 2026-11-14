@@ -42,6 +42,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
+          draft: true
           files: |
             apps/cli/bin/outray-macos-arm64.tar.gz
             apps/cli/bin/outray-macos-x64.tar.gz
@@ -51,8 +52,39 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  publish-npm:
+  sign-macos:
     needs: build
+    runs-on: macos-latest
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Download macOS release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'outray-macos-*.tar.gz' --dir assets
+
+      - name: Sign and verify macOS binaries
+        run: |
+          for arch in arm64 x64; do
+            mkdir "assets/$arch"
+            tar -xzf "assets/outray-macos-$arch.tar.gz" -C "assets/$arch"
+            codesign --force --sign - "assets/$arch/outray"
+            codesign --verify --strict "assets/$arch/outray"
+            tar -czf "assets/outray-macos-$arch.tar.gz" -C "assets/$arch" outray
+          done
+          native_arch=x64
+          if [ "$(uname -m)" = arm64 ]; then native_arch=arm64; fi
+          test "$("assets/$native_arch/outray" --version)" = "outray version ${RELEASE_TAG#v}"
+
+      - name: Publish verified release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" assets/outray-macos-*.tar.gz --clobber
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+
+  publish-npm:
+    needs: sign-macos
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,7 +107,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPMJS_TOKEN }}
 
   update-homebrew:
-    needs: build
+    needs: sign-macos
     runs-on: ubuntu-latest
     steps:
       - name: Update Homebrew tap
@@ -87,7 +119,7 @@ jobs:
           client-payload: '{"version": "${{ github.ref_name }}"}'
 
   update-scoop:
-    needs: build
+    needs: sign-macos
     runs-on: ubuntu-latest
     steps:
       - name: Update Scoop bucket
