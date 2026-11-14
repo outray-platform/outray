@@ -10,6 +10,7 @@ interface PendingUpgrade {
   socket: Duplex;
   head: Buffer;
   tunnelId: string;
+  controlWs: WebSocket;
   timeout: NodeJS.Timeout;
 }
 
@@ -29,6 +30,7 @@ export class WSProxy {
   private wss: WebSocketServer;
   private pendingUpgrades = new Map<string, PendingUpgrade>();
   private activeConnections = new Map<string, WebSocket>();
+  private connectionOwners = new Map<string, { tunnelId: string; controlWs: WebSocket }>();
   private readonly UPGRADE_TIMEOUT_MS = 10000;
 
   constructor(router: TunnelRouter) {
@@ -78,6 +80,7 @@ export class WSProxy {
       socket,
       head,
       tunnelId,
+      controlWs: tunnelWs,
       timeout,
     });
 
@@ -106,15 +109,20 @@ export class WSProxy {
   /**
    * Called when the tunnel client responds to a ws_upgrade request.
    */
-  handleUpgradeResponse(message: WSUpgradeResponseMessage): void {
+  handleUpgradeResponse(message: WSUpgradeResponseMessage, controlWs: WebSocket): void {
     const pending = this.pendingUpgrades.get(message.wsConnectionId);
-    if (!pending) {
+    if (!pending || pending.controlWs !== controlWs) {
       console.warn(`No pending upgrade for wsConnectionId: ${message.wsConnectionId}`);
       return;
     }
 
     clearTimeout(pending.timeout);
     this.pendingUpgrades.delete(message.wsConnectionId);
+
+    if (this.router.getTunnel(pending.tunnelId) !== pending.controlWs) {
+      pending.socket.destroy();
+      return;
+    }
 
     if (!message.success) {
       pending.socket.write(
@@ -131,6 +139,7 @@ export class WSProxy {
     // Complete the upgrade for the end-user
     this.wss.handleUpgrade(pending.request, pending.socket, pending.head, (endUserWs) => {
       this.activeConnections.set(message.wsConnectionId, endUserWs);
+      this.connectionOwners.set(message.wsConnectionId, { tunnelId: pending.tunnelId, controlWs: pending.controlWs });
 
       console.log(`✓ WebSocket connection established: ${message.wsConnectionId}`);
 
@@ -153,6 +162,7 @@ export class WSProxy {
       // Handle end-user disconnect
       endUserWs.on("close", (code, reason) => {
         this.activeConnections.delete(message.wsConnectionId);
+        this.connectionOwners.delete(message.wsConnectionId);
         const tunnelWs = this.router.getTunnel(pending.tunnelId);
         if (tunnelWs && tunnelWs.readyState === WebSocket.OPEN) {
           tunnelWs.send(
@@ -170,6 +180,7 @@ export class WSProxy {
       endUserWs.on("error", (error) => {
         console.error(`WebSocket error for ${message.wsConnectionId}:`, error);
         this.activeConnections.delete(message.wsConnectionId);
+        this.connectionOwners.delete(message.wsConnectionId);
       });
     });
   }
@@ -177,7 +188,8 @@ export class WSProxy {
   /**
    * Called when the tunnel client sends a WebSocket frame from the local server.
    */
-  handleFrame(message: WSFrameMessage): void {
+  handleFrame(message: WSFrameMessage, controlWs: WebSocket): void {
+    if (this.connectionOwners.get(message.wsConnectionId)?.controlWs !== controlWs) return;
     const endUserWs = this.activeConnections.get(message.wsConnectionId);
     if (!endUserWs || endUserWs.readyState !== WebSocket.OPEN) {
       return;
@@ -190,13 +202,15 @@ export class WSProxy {
   /**
    * Called when the tunnel client signals that the local WebSocket closed.
    */
-  handleClose(message: WSCloseMessage): void {
+  handleClose(message: WSCloseMessage, controlWs: WebSocket): void {
+    if (this.connectionOwners.get(message.wsConnectionId)?.controlWs !== controlWs) return;
     const endUserWs = this.activeConnections.get(message.wsConnectionId);
     if (!endUserWs) {
       return;
     }
 
     this.activeConnections.delete(message.wsConnectionId);
+    this.connectionOwners.delete(message.wsConnectionId);
     endUserWs.close(message.code || 1000, message.reason || "");
     console.log(`WebSocket closed by local server: ${message.wsConnectionId} (code: ${message.code})`);
   }
@@ -204,20 +218,22 @@ export class WSProxy {
   /**
    * Clean up all connections for a given tunnel (e.g., when the tunnel client disconnects).
    */
-  cleanupTunnel(tunnelId: string): void {
+  cleanupTunnel(tunnelId: string, controlWs?: WebSocket): void {
     // Close pending upgrades for this tunnel
     for (const [id, pending] of this.pendingUpgrades) {
-      if (pending.tunnelId === tunnelId) {
+      if (pending.tunnelId === tunnelId && (!controlWs || pending.controlWs === controlWs)) {
         clearTimeout(pending.timeout);
         pending.socket.destroy();
         this.pendingUpgrades.delete(id);
       }
     }
 
-    // Close active connections (we need to find by tunnelId, but we don't track it on active connections)
-    // The connections will be closed when the tunnel client's control WS closes, triggering ws_close handling.
-    // However, to be safe, we'll close any remaining end-user connections:
-    // Since we don't track tunnelId on active connections directly, they'll get cleaned up
-    // when the end-user tries to send a frame and the tunnel WS is gone.
+    for (const [id, owner] of this.connectionOwners) {
+      if (owner.tunnelId === tunnelId && (!controlWs || owner.controlWs === controlWs)) {
+        this.activeConnections.get(id)?.terminate();
+        this.activeConnections.delete(id);
+        this.connectionOwners.delete(id);
+      }
+    }
   }
 }

@@ -29,7 +29,7 @@ export interface OutrayClientOptions {
 
   /**
    * Subdomain to use for the tunnel URL
-   * Requires authentication
+   * Reserved subdomains require authentication
    */
   subdomain?: string;
 

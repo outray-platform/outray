@@ -678,6 +678,10 @@ async function main() {
 
   // Handle --key before loading saved config so API-key-only usage works in CI.
   const keyValue = getFlagValue(remainingArgs, "--key");
+  if (remainingArgs.some(arg => arg === "--key" || arg.startsWith("--key=")) && !keyValue?.trim()) {
+    console.log(chalk.red("❌ --key requires a nonempty authentication token"));
+    process.exit(1);
+  }
 
   // Handle --qr flag to render a QR Code of the tunnel url
   const showQr = hasFlag(remainingArgs, "--qr");
@@ -754,8 +758,11 @@ async function main() {
   let config = configManager.load();
 
   if (!config && !keyValue) {
-    console.log(chalk.red("❌ Not logged in. Run: outray login"));
-    process.exit(1);
+    if (tunnelProtocol !== "http" || customDomain || password || tempOrgSlug) {
+      console.log(chalk.red("❌ This tunnel feature requires authentication. Run: outray login"));
+      process.exit(1);
+    }
+    console.log(chalk.dim("Guest HTTP tunnel: expires after 60 minutes; one active tunnel per IP, five starts per minute."));
   }
 
   // Handle temporary org override
