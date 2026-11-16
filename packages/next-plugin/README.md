@@ -17,6 +17,29 @@ import withOutray from "@outray/next";
 export default withOutray({});
 ```
 
+### Allow the tunnel origin
+
+Next.js 15+ blocks dev assets and HMR requests from origins it does not know,
+so styles and hot reload can break when the app is opened through the tunnel.
+Add the tunnel hostname to `allowedDevOrigins` and restart `next dev`:
+
+```typescript
+// next.config.ts
+import withOutray from "@outray/next";
+
+export default withOutray(
+  { allowedDevOrigins: ["my-app.outray.app"] },
+  { subdomain: "my-app" },
+);
+```
+
+Once the tunnel is ready, the plugin prints this snippet with your tunnel's
+hostname unless it is already listed (or `silent` is set). The `outray` CLI
+prints the same hint the first time it proxies a Next.js dev server. List the
+exact hostname rather than `*.outray.app`, which would trust every OutRay
+tunnel. See the
+[docs](https://outray.co/docs/nextjs-plugin#allow-the-tunnel-origin) for more.
+
 ## Observability
 
 Next.js provides a server-side instrumentation hook. Configure OutRay there;
