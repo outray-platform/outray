@@ -17,6 +17,7 @@ interface TunnelRouterOptions {
   ttlSeconds?: number;
   heartbeatIntervalMs?: number;
   requestTimeoutMs?: number;
+  organizationAccessAvailable?: () => boolean;
 }
 
 export interface TunnelMetadata {
@@ -48,6 +49,7 @@ export class TunnelRouter {
   private refreshing = false;
   private expiryTimers = new Map<string, NodeJS.Timeout>();
   private connectionIds = new WeakMap<WebSocket, string>();
+  private readonly organizationAccessAvailable: () => boolean;
 
   constructor(options: TunnelRouterOptions = {}) {
     this.redis = options.redis;
@@ -57,6 +59,7 @@ export class TunnelRouter {
       options.heartbeatIntervalMs ?? 20000,
     );
     this.requestTimeoutMs = options.requestTimeoutMs ?? 60000;
+    this.organizationAccessAvailable = options.organizationAccessAvailable ?? (() => false);
 
     if (this.redis) {
       this.startHeartbeat();
@@ -91,7 +94,15 @@ export class TunnelRouter {
         type?: string;
         organizationId?: string;
         enabled?: boolean;
+        tunnelId?: string;
+        dbTunnelId?: string;
+        access?: string;
       };
+
+      if (controlMessage.type === "tunnel_access") {
+        this.applyAccessChange(controlMessage);
+        return;
+      }
 
       if (
         controlMessage.type !== "full_capture_setting" ||
@@ -120,6 +131,29 @@ export class TunnelRouter {
     } catch {
       // Ignore control messages owned by older or unrelated producers.
     }
+  }
+
+  /**
+   * Console-initiated switch between public and organization access for a live
+   * tunnel. Password tunnels keep their mode; the CLI's choice applies again on reconnect.
+   */
+  applyAccessChange(change: { tunnelId?: string; organizationId?: string; dbTunnelId?: string; access?: string }): boolean {
+    if (!change.tunnelId || (change.access !== "public" && change.access !== "organization")) return false;
+    const ws = this.tunnels.get(change.tunnelId);
+    const metadata = this.tunnelMetadata.get(change.tunnelId);
+    if (!ws || !metadata?.organizationId || metadata.organizationId !== change.organizationId ||
+        metadata.dbTunnelId !== change.dbTunnelId || metadata.access === "password" || metadata.password) {
+      return false;
+    }
+    if (change.access === "organization" && (!this.organizationAccessAvailable() || !metadata.plan || metadata.plan === "free")) {
+      return false;
+    }
+    const updated: TunnelMetadata = { ...metadata, access: change.access };
+    if (change.access === "public") delete updated.accessBypass;
+    this.tunnelMetadata.set(change.tunnelId, updated);
+    void this.persistTunnelState(change.tunnelId, "XX", ws, updated);
+    console.log(`Tunnel ${change.tunnelId} access set to ${change.access} from the console`);
+    return true;
   }
 
   getRedis(): Redis | undefined {

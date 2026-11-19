@@ -75,6 +75,7 @@ const router = new TunnelRouter({
   ttlSeconds: config.redisTunnelTtlSeconds,
   heartbeatIntervalMs: config.redisHeartbeatIntervalMs,
   requestTimeoutMs: config.requestTimeoutMs,
+  organizationAccessAvailable: () => accessGate.configured,
 });
 const httpServer = createServer();
 const logManager = new LogManager();
