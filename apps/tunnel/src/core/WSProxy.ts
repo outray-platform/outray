@@ -4,6 +4,10 @@ import WebSocket, { WebSocketServer } from "ws";
 import { TunnelRouter } from "./TunnelRouter";
 import { Protocol, WSUpgradeResponseMessage, WSFrameMessage, WSCloseMessage } from "./Protocol";
 import { generateId } from "../../../../shared/utils";
+import type { AccessIdentity, TunnelAccessGate } from "../lib/tunnel-access-gate";
+import { matchesBypass } from "../lib/tunnel-access-policy";
+
+const STATUS_TEXT: Record<number, string> = { 401: "Unauthorized", 403: "Forbidden", 503: "Service Unavailable" };
 
 interface PendingUpgrade {
   request: IncomingMessage;
@@ -30,12 +34,47 @@ export class WSProxy {
   private wss: WebSocketServer;
   private pendingUpgrades = new Map<string, PendingUpgrade>();
   private activeConnections = new Map<string, WebSocket>();
-  private connectionOwners = new Map<string, { tunnelId: string; controlWs: WebSocket }>();
+  private connectionOwners = new Map<string, { tunnelId: string; controlWs: WebSocket; path: string; identity?: AccessIdentity }>();
+  private pendingIdentities = new Map<string, AccessIdentity>();
   private readonly UPGRADE_TIMEOUT_MS = 10000;
+  private accessGate?: TunnelAccessGate;
+  private recheckTimer?: NodeJS.Timeout;
 
-  constructor(router: TunnelRouter) {
+  constructor(router: TunnelRouter, accessGate?: TunnelAccessGate, accessRecheckMs = 60_000) {
     this.router = router;
     this.wss = new WebSocketServer({ noServer: true });
+    this.accessGate = accessGate;
+    this.recheckTimer = setInterval(() => void this.recheckAccess(), accessRecheckMs);
+    this.recheckTimer.unref();
+  }
+
+  shutdown(): void {
+    clearInterval(this.recheckTimer);
+  }
+
+  /**
+   * Long-lived sockets outlive the request that authorized them. Close any whose
+   * grant was revoked, and any opened without sign-in once the tunnel requires it.
+   */
+  async recheckAccess(tunnelId?: string): Promise<void> {
+    await Promise.all(Array.from(this.connectionOwners, async ([id, owner]) => {
+      if (tunnelId !== undefined && owner.tunnelId !== tunnelId) return;
+      const metadata = this.router.getTunnelMetadata(owner.tunnelId);
+      if (metadata?.access !== "organization") return;
+      if (owner.identity && this.accessGate && await this.accessGate.stillAuthorized(owner.identity)) return;
+      if (!owner.identity && matchesBypass(owner.path, metadata.accessBypass)) return;
+      this.activeConnections.get(id)?.close(1008, "Organization access required");
+    }));
+  }
+
+  private reject(socket: Duplex, status: number, body: string, headers: Record<string, string | string[]> = {}): void {
+    const lines = [`HTTP/1.1 ${status} ${STATUS_TEXT[status] ?? "Error"}`, "Connection: close"];
+    for (const [name, value] of Object.entries(headers)) {
+      if (name.toLowerCase() === "location") continue;
+      for (const item of Array.isArray(value) ? value : [value]) lines.push(`${name}: ${item}`);
+    }
+    socket.write(`${lines.join("\r\n")}\r\n\r\n${body}`);
+    socket.destroy();
   }
 
   /**
@@ -43,9 +82,25 @@ export class WSProxy {
    * Sends a ws_upgrade to the tunnel client and waits for confirmation
    * before completing the upgrade with the end-user.
    */
-  handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
+  async handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     const host = (request.headers.host || "").split(":")[0].toLowerCase();
     const tunnelId = host;
+
+    let identity: AccessIdentity | undefined;
+    const metadata = this.router.getTunnelMetadata(tunnelId);
+    if (metadata?.access === "organization") {
+      if (!this.accessGate) {
+        this.reject(socket, 503, "Organization access is unavailable");
+        return;
+      }
+      const decision = await this.accessGate.authorizeUpgrade(request, host, metadata);
+      if (decision.action === "respond") {
+        this.reject(socket, decision.status, decision.body, decision.headers);
+        return;
+      }
+      if (socket.destroyed) return;
+      identity = decision.identity;
+    }
 
     // Verify the tunnel exists
     const tunnelWs = this.router.getTunnel(tunnelId);
@@ -65,6 +120,7 @@ export class WSProxy {
     // Store the pending upgrade
     const timeout = setTimeout(() => {
       this.pendingUpgrades.delete(wsConnectionId);
+      this.pendingIdentities.delete(wsConnectionId);
       socket.write(
         "HTTP/1.1 504 Gateway Timeout\r\n" +
         "Content-Type: text/plain\r\n" +
@@ -91,6 +147,8 @@ export class WSProxy {
         headers[key] = value;
       }
     }
+    if (metadata?.access === "organization") this.accessGate?.stripCookie(headers);
+    if (identity) this.pendingIdentities.set(wsConnectionId, identity);
 
     // Send ws_upgrade to the tunnel client
     tunnelWs.send(
@@ -118,6 +176,8 @@ export class WSProxy {
 
     clearTimeout(pending.timeout);
     this.pendingUpgrades.delete(message.wsConnectionId);
+    const identity = this.pendingIdentities.get(message.wsConnectionId);
+    this.pendingIdentities.delete(message.wsConnectionId);
 
     if (this.router.getTunnel(pending.tunnelId) !== pending.controlWs) {
       pending.socket.destroy();
@@ -139,7 +199,7 @@ export class WSProxy {
     // Complete the upgrade for the end-user
     this.wss.handleUpgrade(pending.request, pending.socket, pending.head, (endUserWs) => {
       this.activeConnections.set(message.wsConnectionId, endUserWs);
-      this.connectionOwners.set(message.wsConnectionId, { tunnelId: pending.tunnelId, controlWs: pending.controlWs });
+      this.connectionOwners.set(message.wsConnectionId, { tunnelId: pending.tunnelId, controlWs: pending.controlWs, path: pending.request.url || "/", identity });
 
       console.log(`✓ WebSocket connection established: ${message.wsConnectionId}`);
 
@@ -225,6 +285,7 @@ export class WSProxy {
         clearTimeout(pending.timeout);
         pending.socket.destroy();
         this.pendingUpgrades.delete(id);
+        this.pendingIdentities.delete(id);
       }
     }
 

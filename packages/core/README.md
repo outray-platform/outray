@@ -76,6 +76,9 @@ client.stop();
 | `customDomain` | `string` | - | Custom domain (must be configured in dashboard) |
 | `protocol` | `'http' \| 'tcp' \| 'udp'` | `'http'` | Tunnel protocol type |
 | `remotePort` | `number` | - | Remote port for TCP/UDP tunnels |
+| `password` | `string` | - | Basic-auth password for HTTP tunnels (paid plans) |
+| `access` | `"public" \| "password" \| "organization"` | `"public"` | `"organization"` admits only signed-in members of the tunnel's organization (API key and paid plan required) |
+| `accessBypass` | `string[]` | - | Path prefixes reachable without sign-in, e.g. `["/webhooks"]`. These paths are public |
 | `onTunnelReady` | `(url: string, port?: number) => void` | - | Called when tunnel is established |
 | `onError` | `(error: Error, code?: string) => void` | - | Called on error |
 | `onClose` | `(reason?: string) => void` | - | Called when tunnel closes |

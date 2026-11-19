@@ -27,9 +27,11 @@ async function harness(t: TestContext, options: {
   auth?: (body: Body) => Promise<Response> | Response;
   check?: (body: Body) => Promise<Response> | Response;
   register?: (body: Body) => Promise<Response> | Response;
+  organizationAccess?: boolean;
+  settings?: (body: Body, authorization: string | null) => Promise<Response> | Response;
 } = {}) {
-  const calls = { auth: [] as Body[], check: [] as Body[], register: [] as Body[], usage: [] as unknown[][] };
-  const router = new TunnelRouter({ redis: options.redis });
+  const calls = { auth: [] as Body[], check: [] as Body[], register: [] as Body[], usage: [] as unknown[][], settings: [] as Body[] };
+  const router = new TunnelRouter({ redis: options.redis, organizationAccessAvailable: () => options.organizationAccess ?? true });
   const proxyTunnels = new Set<string>();
   const proxy = {
     async createTunnel(id: string) { proxyTunnels.add(id); return { success: true, port: 23456 }; },
@@ -50,6 +52,10 @@ async function harness(t: TestContext, options: {
       return options.check?.(body) ?? Response.json({ allowed: true, type: "available" });
     }
     if (name === "verify-ownership") return Response.json({ valid: true });
+    if (name === "settings") {
+      calls.settings.push(body);
+      return options.settings?.(body, new Headers(init?.headers).get("authorization")) ?? Response.json({ access: null });
+    }
     if (name === "register") {
       calls.register.push(body);
       return options.register?.(body) ?? Response.json({ success: true, tunnelId: "db-a" });
@@ -57,7 +63,7 @@ async function harness(t: TestContext, options: {
     throw new Error(`Unexpected API: ${url}`);
   }) as typeof fetch, async (...args) => { calls.usage.push(args); });
   const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
-  const handler = new Handler(wss, router, proxy as unknown as TCPProxy, proxy as unknown as UDPProxy);
+  const handler = new Handler(wss, router, proxy as unknown as TCPProxy, proxy as unknown as UDPProxy, undefined, () => options.organizationAccess ?? true);
   if (options.guestLifetimeMs !== undefined) {
     Reflect.set(handler, "guestLimits", new GuestTunnelLimits(options.redis, 120000, options.guestLifetimeMs));
   }
@@ -96,7 +102,7 @@ test("protected tunnel features reject missing credentials before allocation", {
     assert.equal((await send(ws, { type: "open_tunnel", ...fields })).code, "AUTH_REQUIRED");
     await closed;
   }
-  assert.deepEqual(f.calls, { auth: [], check: [], register: [], usage: [] });
+  assert.deepEqual(f.calls, { auth: [], check: [], register: [], usage: [], settings: [] });
   assert.equal(f.proxyTunnels.size, 0);
 });
 
@@ -108,7 +114,7 @@ test("empty and malformed supplied credentials never fall back to guest access",
     assert.equal((await send(ws, { type: "open_tunnel", apiKey })).code, "AUTH_FAILED");
     await closed;
   }
-  assert.deepEqual(f.calls, { auth: [], check: [], register: [], usage: [] });
+  assert.deepEqual(f.calls, { auth: [], check: [], register: [], usage: [], settings: [] });
 });
 
 test("invalid credentials, unsuccessful auth responses and organization-less identities fail closed", { timeout: 5000 }, async t => {
@@ -368,4 +374,152 @@ test("guest fallback names remain DNS-valid and undergo the same reservation che
   assert.equal(opened.type, "tunnel_opened");
   assert.equal(checks, 6);
   assert.match(new URL(opened.url).hostname, /^tunnel-/);
+});
+
+const paid = () => Response.json({ valid: true, organizationId: "org-a", userId: "user-a", plan: "pro" });
+
+test("organization access is recorded on the route with normalized bypass prefixes", { timeout: 5000 }, async t => {
+  const f = await harness(t, { auth: paid });
+  const ws = await f.connect();
+  const opened = await send(ws, { ...opening, access: "organization", accessBypass: ["/webhooks/", "/health"] });
+  assert.equal(opened.type, "tunnel_opened");
+  const metadata = f.router.getTunnelMetadata(opened.tunnelId)!;
+  assert.equal(metadata.access, "organization");
+  assert.deepEqual(metadata.accessBypass, ["/webhooks", "/health"]);
+  assert.equal(metadata.organizationId, "org-a");
+});
+
+test("guests cannot request organization access or bypass paths", { timeout: 5000 }, async t => {
+  const f = await harness(t);
+  for (const fields of [{ access: "organization" }, { access: "password" }, { accessBypass: ["/webhooks"] }]) {
+    const ws = await f.connect();
+    const closed = once(ws, "close");
+    const error = await send(ws, { type: "open_tunnel", ...fields });
+    assert.equal(error.code, "AUTH_REQUIRED");
+    if (fields.access === "organization") assert.match(error.message, /organization login/);
+    await closed;
+  }
+  assert.deepEqual(f.calls, { auth: [], check: [], register: [], usage: [], settings: [] });
+});
+
+test("organization access is paid-only, HTTP-only and exclusive with passwords", { timeout: 5000 }, async t => {
+  const cases: Array<[Body, string, Parameters<typeof harness>[1]]> = [
+    [{ access: "organization" }, "ORG_ACCESS_REQUIRES_PAID", {}],
+    [{ access: "organization", password: "x" }, "INVALID_ACCESS", { auth: paid }],
+    [{ access: "organization", protocol: "tcp" }, "INVALID_ACCESS", { auth: paid }],
+    [{ access: "organization", accessBypass: ["/../admin"] }, "INVALID_ACCESS", { auth: paid }],
+    [{ access: "organization", accessBypass: ["/"] }, "INVALID_ACCESS", { auth: paid }],
+    [{ access: "public", accessBypass: ["/webhooks"] }, "INVALID_ACCESS", { auth: paid }],
+    [{ access: "everyone" }, "INVALID_ACCESS", { auth: paid }],
+    [{ access: "organization" }, "ORG_ACCESS_UNAVAILABLE", { auth: paid, organizationAccess: false }],
+  ];
+  for (const [fields, code, options] of cases) {
+    const f = await harness(t, options);
+    const ws = await f.connect();
+    const closed = once(ws, "close");
+    assert.equal((await send(ws, { ...opening, ...fields })).code, code, JSON.stringify(fields));
+    await closed;
+    assert.equal(f.calls.check.length + f.calls.register.length, 0);
+    assert.equal(f.proxyTunnels.size, 0);
+  }
+});
+
+test("existing password clients keep password access without sending an access mode", { timeout: 5000 }, async t => {
+  const f = await harness(t, { auth: paid });
+  const ws = await f.connect();
+  const opened = await send(ws, { ...opening, password: "s3cret" });
+  assert.equal(opened.type, "tunnel_opened");
+  assert.equal(f.router.getTunnelMetadata(opened.tunnelId)?.access, "password");
+});
+
+test("a saved console setting overrides the client's access before the address is reserved", { timeout: 5000 }, async t => {
+  let reservedDuringLookup: boolean | undefined;
+  let router: TunnelRouter | undefined;
+  const f = await harness(t, { auth: paid, settings: (body, authorization) => {
+    assert.equal(authorization, "Bearer edge-secret");
+    reservedDuringLookup ??= router!.hasTunnel(body.host);
+    return Response.json({ access: "organization" });
+  } });
+  router = f.router;
+  const ws = await f.connect();
+  const opened = await send(ws, opening);
+  assert.equal(opened.type, "tunnel_opened");
+  assert.equal(opened.access, "organization");
+  assert.equal(reservedDuringLookup, false, "lookup completes before the address can serve traffic");
+  assert.deepEqual(f.calls.settings, [{ organizationId: "org-a", host: opened.tunnelId }, { organizationId: "org-a", host: opened.tunnelId }],
+    "looked up before reserving and again after registration");
+  const metadata = f.router.getTunnelMetadata(opened.tunnelId)!;
+  assert.equal(metadata.access, "organization");
+  assert.equal(metadata.requestedAccess, "public");
+});
+
+test("a saved public setting relaxes an organization request and drops its bypass paths", { timeout: 5000 }, async t => {
+  const f = await harness(t, { auth: paid, settings: () => Response.json({ access: "public" }) });
+  const ws = await f.connect();
+  const opened = await send(ws, { ...opening, access: "organization", accessBypass: ["/hooks"] });
+  assert.equal(opened.access, "public");
+  const metadata = f.router.getTunnelMetadata(opened.tunnelId)!;
+  assert.equal(metadata.access, "public");
+  assert.equal(metadata.accessBypass, undefined);
+  assert.deepEqual(metadata.requestedAccessBypass, ["/hooks"]);
+});
+
+test("saved settings never apply to password tunnels, guests or TCP", { timeout: 5000 }, async t => {
+  const f = await harness(t, { auth: paid, settings: () => Response.json({ access: "public" }) });
+  for (const fields of [{ password: "s3cret" }, { protocol: "tcp" }]) {
+    const ws = await f.connect();
+    assert.equal((await send(ws, { ...opening, ...fields })).type, "tunnel_opened");
+  }
+  assert.equal(f.calls.settings.length, 0);
+});
+
+test("unreadable or unusable saved settings fail closed without reserving an address", { timeout: 5000 }, async t => {
+  for (const [options, code] of [
+    [{ auth: paid, settings: () => Response.json({ error: "down" }, { status: 503 }) }, "TUNNEL_UNAVAILABLE"],
+    [{ auth: paid, settings: () => { throw new Error("console unreachable"); } }, "TUNNEL_UNAVAILABLE"],
+    [{ settings: () => Response.json({ access: "organization" }) }, "ORG_ACCESS_REQUIRES_PAID"],
+  ] as Array<[Parameters<typeof harness>[1], string]>) {
+    for (const fields of [{}, { subdomain: null }, { customDomain: "preview.example.test" }]) {
+      const f = await harness(t, options);
+      const ws = await f.connect();
+      const closed = once(ws, "close");
+      assert.equal((await send(ws, { ...opening, ...fields })).code, code, JSON.stringify(fields));
+      await closed;
+      assert.equal(f.calls.register.length, 0);
+      assert.equal(f.calls.check.length, 0);
+    }
+  }
+});
+
+test("a setting saved while the tunnel was opening is applied once registration completes", { timeout: 5000 }, async t => {
+  let lookups = 0;
+  const f = await harness(t, { auth: paid, settings: () => Response.json({ access: ++lookups === 1 ? null : "organization" }) });
+  const ws = await f.connect();
+  const opened = await send(ws, opening);
+  assert.equal(opened.type, "tunnel_opened", JSON.stringify(opened));
+  assert.equal(opened.access, "organization");
+  assert.equal(f.router.getTunnelMetadata(opened.tunnelId)?.access, "organization");
+  assert.equal(lookups, 2);
+});
+
+test("a failed post-registration lookup closes the tunnel instead of serving it with stale access", { timeout: 5000 }, async t => {
+  let lookups = 0;
+  const f = await harness(t, { auth: paid, settings: () => {
+    if (++lookups === 2) throw new Error("console unreachable");
+    return Response.json({ access: null });
+  } });
+  const ws = await f.connect();
+  const closed = once(ws, "close");
+  assert.equal((await send(ws, opening)).code, "TUNNEL_UNAVAILABLE");
+  await closed;
+  await eventually(() => f.router.getTunnelMetadata(`${opening.subdomain}.localhost.direct`) === undefined);
+});
+
+test("saved settings are skipped where organization access is off, and a console without the endpoint means none", { timeout: 5000 }, async t => {
+  const off = await harness(t, { auth: paid, organizationAccess: false, settings: () => Response.json({ access: "organization" }) });
+  assert.equal((await send(await off.connect(), opening)).access, "public");
+  assert.equal(off.calls.settings.length, 0);
+  const old = await harness(t, { auth: paid, settings: () => new Response("Not found", { status: 404 }) });
+  assert.equal((await send(await old.connect(), opening)).access, "public");
+  assert.equal(old.calls.settings.length, 2);
 });

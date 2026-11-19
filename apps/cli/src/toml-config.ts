@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import TOML from "@iarna/toml";
 import Joi from "joi";
+import { resolveAccessOptions, TOML_LABELS, type TunnelAccess } from "./tunnel-access";
 
 export type TunnelProtocol = "http" | "tcp" | "udp";
 
@@ -15,6 +16,8 @@ export interface TunnelConfig {
   org?: string;
   local?: boolean;
   password?: string;
+  access?: string;
+  access_bypass?: string[];
 }
 
 export interface GlobalConfig {
@@ -45,6 +48,13 @@ export interface ParsedTunnelConfig {
   org?: string;
   local?: boolean;
   password?: string;
+  access?: TunnelAccess;
+  accessBypass?: string[];
+}
+
+function accessFields(tunnel: TunnelConfig): Pick<ParsedTunnelConfig, "access" | "accessBypass"> {
+  const resolved = resolveAccessOptions({ access: tunnel.access, accessBypass: tunnel.access_bypass, password: tunnel.password, protocol: tunnel.protocol }, TOML_LABELS);
+  return resolved.ok ? { access: resolved.access, accessBypass: resolved.accessBypass } : {};
 }
 
 const portSchema = Joi.number().integer().min(1).max(65535).required();
@@ -79,8 +89,12 @@ const tunnelConfigSchema = Joi.object({
   org: Joi.string().optional(),
   local: Joi.boolean().optional().default(false),
   password: Joi.string().optional(),
+  access: Joi.string().valid("public", "password", "org", "organization").optional(),
+  access_bypass: Joi.array().items(Joi.string()).max(10).optional(),
 }).custom((value: TunnelConfig, helpers: Joi.CustomHelpers) => {
   const protocol = value.protocol;
+  const access = resolveAccessOptions({ access: value.access, accessBypass: value.access_bypass, password: value.password, protocol }, TOML_LABELS);
+  if (!access.ok) return helpers.error("any.invalid", { message: access.error });
 
   if (protocol === "http") {
     if (value.remote_port !== undefined) {
@@ -221,6 +235,7 @@ export class TomlConfigParser {
         org: tunnel.org || globalConfig?.org,
         local: tunnel.local,
         password: tunnel.password,
+        ...accessFields(tunnel),
       });
     }
 

@@ -17,6 +17,15 @@ Without saved credentials, HTTP tunnels run as guests for up to 60 minutes, with
 
 OutRay gives you a public HTTPS address that forwards requests to `localhost:3000`. WebSocket connections are supported too.
 
+To share a tunnel only with your team, require OutRay sign-in (paid plans):
+
+```sh
+outray 3000 --access org                          # members of your organization only
+outray 3000 --access org --access-bypass /webhooks  # keep webhook senders working
+```
+
+Visitors sign in with OutRay and must belong to the tunnel's organization. Bypassed paths are public to everyone, so verify webhook signatures in your app. `--access org` cannot be combined with `--password`. See [Organization access](https://outray.co/docs/organization-access).
+
 For TCP and UDP services:
 
 ```sh

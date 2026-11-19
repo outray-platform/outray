@@ -1,4 +1,5 @@
 export type TunnelProtocol = "http" | "tcp" | "udp";
+export type TunnelAccess = "public" | "password" | "organization";
 
 export interface HelloMessage {
   type: "hello";
@@ -15,6 +16,10 @@ export interface OpenTunnelMessage {
   protocol?: TunnelProtocol;
   remotePort?: number; // For TCP/UDP: the port to expose on the server
   password?: string;
+  /** Defaults to "password" when a password is set, otherwise "public". */
+  access?: TunnelAccess;
+  /** Path prefixes served without organization sign-in, e.g. ["/webhooks"]. */
+  accessBypass?: string[];
 }
 
 export interface TunnelOpenedMessage {
@@ -24,6 +29,14 @@ export interface TunnelOpenedMessage {
   plan?: string;
   protocol?: TunnelProtocol;
   port?: number; // For TCP/UDP: the assigned port on the server
+  /** Effective access; differs from the request when the console saved a setting for this address. */
+  access?: TunnelAccess;
+}
+
+/** Sent when the console changes a live tunnel's access. */
+export interface AccessUpdatedMessage {
+  type: "access_updated";
+  access: TunnelAccess;
 }
 
 // TCP/UDP specific messages
@@ -124,6 +137,7 @@ export type Message =
   | HelloMessage
   | OpenTunnelMessage
   | TunnelOpenedMessage
+  | AccessUpdatedMessage
   | RequestMessage
   | ResponseMessage
   | PingMessage

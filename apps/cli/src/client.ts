@@ -10,6 +10,7 @@ import type {
   WSCloseMessage,
 } from "@outray/core";
 import http from "http";
+import type { TunnelAccess } from "./tunnel-access";
 import { MDNSAdvertiser, LocalProxy, LocalHttpsProxy } from "./mdns";
 
 export class OutRayClient {
@@ -38,6 +39,8 @@ export class OutRayClient {
   private readonly PONG_TIMEOUT_MS = 10000; // 10 seconds to wait for pong
   private localWebSockets = new Map<string, WebSocket>();
   private password?: string;
+  private access?: TunnelAccess;
+  private accessBypass?: string[];
   private showQr: boolean;
 
   constructor(
@@ -50,6 +53,8 @@ export class OutRayClient {
     enableLocal: boolean = false,
     password?: string,
     showQr: boolean = false,
+    access?: TunnelAccess,
+    accessBypass?: string[],
   ) {
     this.localPort = localPort;
     this.serverUrl = serverUrl;
@@ -61,6 +66,8 @@ export class OutRayClient {
     this.enableLocal = enableLocal;
     this.password = password;
     this.showQr = showQr;
+    this.access = access;
+    this.accessBypass = accessBypass?.length ? accessBypass : undefined;
   }
 
   public start(): void {
@@ -196,15 +203,18 @@ export class OutRayClient {
     console.log(chalk.green(`Linked to your local port ${this.localPort}`));
     this.startPing();
 
-    const handshake = encodeMessage({
-      type: "open_tunnel",
+    // Built separately: access fields are newer than the published @outray/core message type.
+    const open = {
+      type: "open_tunnel" as const,
       apiKey: this.apiKey,
       subdomain: this.subdomain,
       customDomain: this.customDomain,
       forceTakeover: this.forceTakeover,
       password: this.password,
-    });
-    this.ws?.send(handshake);
+      access: this.access,
+      accessBypass: this.accessBypass,
+    };
+    this.ws?.send(encodeMessage(open));
   }
 
   private async handleMessage(data: string): Promise<void> {
@@ -223,7 +233,16 @@ export class OutRayClient {
         // Keep subdomainConflictHandled to detect takeovers
         this.forceTakeover = false;
         this.reconnectAttempts = 0;
+        const access = (message as { access?: string }).access;
+        if (!access && this.access === "organization") {
+          // Edges that predate organization access ignore the request and would serve the tunnel publicly.
+          console.log(chalk.red("❌ This tunnel server doesn't support --access org, so the tunnel would be public. Stopping."));
+          this.shouldReconnect = false;
+          this.stop();
+          process.exit(1);
+        }
         console.log(chalk.magenta(`✨ Tunnel ready: ${message.url}`));
+        this.reportAccess(access, false);
         console.log(
           chalk.yellow("Keep this running to keep your tunnel active."),
         );
@@ -287,6 +306,11 @@ export class OutRayClient {
           this.shouldReconnect = false;
           this.stop();
           process.exit(1);
+        } else if (["ORG_ACCESS_REQUIRES_PAID", "ORG_ACCESS_UNAVAILABLE", "INVALID_ACCESS"].includes(message.code)) {
+          console.log(chalk.red(`❌ Error: ${message.message}`));
+          this.shouldReconnect = false;
+          this.stop();
+          process.exit(1);
         } else if (message.code === "PASSWORD_REQUIRES_PAID") {
           console.log(chalk.red(`❌ Error: ${message.message}`));
           console.log(
@@ -300,6 +324,8 @@ export class OutRayClient {
         } else {
           console.log(chalk.red(`❌ Error: ${message.message}`));
         }
+      } else if ((message.type as string) === "access_updated") {
+        this.reportAccess((message as { access?: string }).access, true);
       } else if (message.type === "request") {
         this.handleTunnelData(message);
       } else if (message.type === "ws_upgrade") {
@@ -311,6 +337,19 @@ export class OutRayClient {
       }
     } catch (error) {
       console.log(chalk.red(`❌ Failed to parse message: ${error}`));
+    }
+  }
+
+  private reportAccess(access: string | undefined, changed: boolean): void {
+    if (!access) return;
+    const requested = this.access ?? (this.password ? "password" : "public");
+    const label = access === "organization" ? "organization members only" : access === "password" ? "password protected" : "public";
+    if (changed) {
+      console.log(chalk.yellow(`Access changed in the console: ${label}`));
+    } else if (access !== requested) {
+      console.log(chalk.yellow(`Access: ${label} (saved for this address in the console; it overrides --access)`));
+    } else if (access === "organization") {
+      console.log(chalk.dim("Access: organization members only"));
     }
   }
 

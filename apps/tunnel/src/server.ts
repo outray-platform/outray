@@ -9,6 +9,7 @@ import { TCPProxy } from "./core/TCPProxy";
 import { UDPProxy } from "./core/UDPProxy";
 import { WSProxy } from "./core/WSProxy";
 import { LogManager } from "./core/LogManager";
+import { TunnelAccessGate } from "./lib/tunnel-access-gate";
 import { config } from "./config";
 import publicHosts from "../../../shared/public-hosts";
 import {
@@ -74,10 +75,22 @@ const router = new TunnelRouter({
   ttlSeconds: config.redisTunnelTtlSeconds,
   heartbeatIntervalMs: config.redisHeartbeatIntervalMs,
   requestTimeoutMs: config.requestTimeoutMs,
+  organizationAccessAvailable: () => accessGate.configured,
+  onAccessChanged: (tunnelId) => void wsProxy.recheckAccess(tunnelId),
 });
 const httpServer = createServer();
 const logManager = new LogManager();
-const proxy = new HTTPProxy(router, config.baseDomain, logManager);
+const webApiUrl = process.env.WEB_API_URL || "http://localhost:3000/api";
+const internalApiSecret = process.env.INTERNAL_API_SECRET;
+const accessGate = new TunnelAccessGate({
+  consoleUrl: config.dashboardUrl,
+  apiUrl: webApiUrl,
+  internalApiSecret,
+  cookieSecret: config.accessCookieSecret,
+  secureCookies: config.baseDomain !== "localhost.direct",
+  revalidateMs: config.accessRevalidateSeconds * 1000,
+});
+const proxy = new HTTPProxy(router, config.baseDomain, logManager, accessGate);
 
 console.log("🚨 BASE DOMAIN LOADED:", config.baseDomain);
 
@@ -96,14 +109,14 @@ const udpProxy = new UDPProxy(
   redis,
 );
 
-const wsProxy = new WSProxy(router);
-const wsHandler = new WSHandler(wssTunnel, router, tcpProxy, udpProxy, wsProxy);
+const wsProxy = new WSProxy(router, accessGate, config.accessRevalidateSeconds * 1000);
+const wsHandler = new WSHandler(wssTunnel, router, tcpProxy, udpProxy, wsProxy, () => accessGate.configured);
+if (!accessGate.configured) {
+  console.log("Organization-only tunnels disabled: set OUTRAY_DASHBOARD_URL and INTERNAL_API_SECRET");
+}
 
 console.log("✅ TCP/UDP tunnel support enabled");
 console.log("✅ WebSocket passthrough enabled");
-
-const webApiUrl = process.env.WEB_API_URL || "http://localhost:3000/api";
-const internalApiSecret = process.env.INTERNAL_API_SECRET;
 
 async function validateDashboardToken(token: string): Promise<{
   valid: boolean;
@@ -176,6 +189,8 @@ wssDashboard.on("connection", async (ws, req) => {
 });
 
 httpServer.on("upgrade", (request, socket, head) => {
+  // Node drops its own error listener before "upgrade"; a reset during an awaited access check must not crash the edge.
+  socket.on("error", () => socket.destroy());
   void (async () => {
   const host = normalizeHost(request.headers.host);
   const { pathname } = new URL(request.url || "", "http://localhost");
@@ -211,7 +226,10 @@ httpServer.on("upgrade", (request, socket, head) => {
     });
   } else {
     // End-user WebSocket to a tunneled subdomain
-    wsProxy.handleUpgrade(request, socket, head);
+    await wsProxy.handleUpgrade(request, socket, head).catch((error) => {
+      console.error("WebSocket upgrade failed:", error);
+      socket.destroy();
+    });
   }
   })();
 });
@@ -281,6 +299,7 @@ httpServer.listen(config.port, config.bindHost, () => {
 const shutdown = async () => {
   console.log("Shutting down tunnel server...");
   wsHandler.shutdown();
+  wsProxy.shutdown();
   await router.shutdown();
   await closeStatusRouting();
   

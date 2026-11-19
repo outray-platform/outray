@@ -46,3 +46,44 @@ test("a policy close without an error frame stops SDK guest reconnection", () =>
   assert.equal(control.shouldReconnect, false);
   assert.equal(control.reconnectTimeout, null);
 });
+
+test("access options are sent in the open_tunnel handshake", () => {
+  const sent: string[] = [];
+  const client = new OutrayClient({ localPort: 3000, apiKey: "key", access: "organization", accessBypass: ["/webhooks"] });
+  const control = client as unknown as { ws: { send(data: string): void }; handleOpen(): void; startPing(): void };
+  control.startPing = () => {};
+  control.ws = { send: data => { sent.push(data); } };
+  control.handleOpen();
+  const handshake = JSON.parse(sent[0]);
+  assert.equal(handshake.access, "organization");
+  assert.deepEqual(handshake.accessBypass, ["/webhooks"]);
+});
+
+test("organization access policy errors stop SDK auto-reconnect", () => {
+  for (const code of ["ORG_ACCESS_REQUIRES_PAID", "ORG_ACCESS_UNAVAILABLE", "INVALID_ACCESS"]) {
+    const client = new OutrayClient({ localPort: 3000, apiKey: "key" });
+    const control = client as unknown as { handleMessage(message: string): void; shouldReconnect: boolean };
+    control.handleMessage(JSON.stringify({ type: "error", code, message: "denied" }));
+    assert.equal(control.shouldReconnect, false, code);
+  }
+});
+
+test("SDK callers hear the effective access on open and on console changes", () => {
+  const seen: string[] = [];
+  const client = new OutrayClient({ localPort: 3000, apiKey: "key", onAccessChange: access => { seen.push(access); } });
+  const control = client as unknown as { handleMessage(message: string): void };
+  control.handleMessage(JSON.stringify({ type: "tunnel_opened", url: "https://app.example.test", access: "organization" }));
+  control.handleMessage(JSON.stringify({ type: "access_updated", access: "public" }));
+  assert.deepEqual(seen, ["organization", "public"]);
+});
+
+test("an organization tunnel refuses to run on an edge that ignores access", () => {
+  const codes: string[] = [];
+  let ready = false;
+  const client = new OutrayClient({ localPort: 3000, apiKey: "key", access: "organization", onTunnelReady: () => { ready = true; }, onError: (_error, code) => { codes.push(code!); } });
+  const control = client as unknown as { handleMessage(message: string): void; shouldReconnect: boolean };
+  control.handleMessage(JSON.stringify({ type: "tunnel_opened", url: "https://app.example.test" }));
+  assert.deepEqual(codes, ["ORG_ACCESS_UNSUPPORTED"]);
+  assert.equal(ready, false);
+  assert.equal(control.shouldReconnect, false);
+});

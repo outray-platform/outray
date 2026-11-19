@@ -18,4 +18,10 @@ Guest sessions have a fixed 60-minute deadline, one active tunnel per IP, and fi
 
 Guest limits use the TCP peer address unless that peer is in `TUNNEL_TRUSTED_PROXY_IPS` (comma-separated exact IPs). Defaults are loopback; Ops can reuse its existing `STATUS_TRUSTED_PROXY_IPS`. Only configure proxies that sanitize forwarding headers. The edge uses the rightmost `X-Forwarded-For` hop from a trusted peer, consistent with [Caddy's forwarding-header behavior](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#headers).
 
+## Organization-only tunnels
+
+Tunnels opened with `--access org` redirect visitors to the console's `/tunnel-auth` page and verify membership with `POST /api/tunnel/access/{redeem,revalidate}`. Both calls are authenticated with `INTERNAL_API_SECRET`. The edge needs `OUTRAY_DASHBOARD_URL` (the console origin it redirects visitors to) and `INTERNAL_API_SECRET`. Without them it refuses organization tunnels with `ORG_ACCESS_UNAVAILABLE` and logs "Organization-only tunnels disabled" at startup. `TUNNEL_ACCESS_COOKIE_SECRET` (optional, shared by every edge) signs visitor cookies; it defaults to a key derived from `INTERNAL_API_SECRET`. `TUNNEL_ACCESS_REVALIDATE_SECONDS` (default 300) bounds how long a removed member keeps access. If the console is unreachable, gated requests get `503`.
+
+Deploy the console before the edge, and the edge before releasing CLI/SDK versions that send `access`. Edges older than this change ignore `access` and would serve those tunnels publicly. Rollout details are in the platform repository at `docs/tunnel-organization-access.md`.
+
 Install `redis-server` on the test runner to exercise all Redis-backed regressions in `npm test --workspace=outray-tunnel`; tests launch isolated socket-only instances and never use deployment Redis settings.

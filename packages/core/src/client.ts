@@ -134,6 +134,9 @@ export class OutrayClient {
       forceTakeover: this.forceTakeover,
       protocol: this.options.protocol,
       remotePort: this.options.remotePort,
+      password: this.options.password,
+      access: this.options.access,
+      accessBypass: this.options.accessBypass?.length ? this.options.accessBypass : undefined,
     });
     this.ws?.send(handshake);
   }
@@ -142,6 +145,13 @@ export class OutrayClient {
     try {
       const message = decodeMessage(data);
 
+      if (message.type === "tunnel_opened" && !message.access && this.options.access === "organization") {
+        // Edges that predate organization access ignore the request and would serve the tunnel publicly.
+        this.shouldReconnect = false;
+        this.options.onError?.(new Error("This tunnel server doesn't support organization access; refusing to run a public tunnel."), "ORG_ACCESS_UNSUPPORTED");
+        this.stop();
+        return;
+      }
       if (message.type === "tunnel_opened") {
         this.assignedUrl = message.url;
         const derivedSubdomain = this.extractSubdomain(message.url);
@@ -151,6 +161,9 @@ export class OutrayClient {
         this.forceTakeover = false;
         this.reconnectAttempts = 0;
         this.options.onTunnelReady?.(message.url, message.port);
+        if (message.access) this.options.onAccessChange?.(message.access);
+      } else if (message.type === "access_updated") {
+        this.options.onAccessChange?.(message.access);
       } else if (message.type === "error") {
         this.handleError(message.code, message.message);
       } else if (message.type === "request") {
@@ -180,7 +193,8 @@ export class OutrayClient {
     this.options.onError?.(new Error(message), code);
 
     // Fatal errors - stop reconnecting
-    if (["AUTH_FAILED", "AUTH_REQUIRED", "LIMIT_EXCEEDED", "TUNNEL_EXPIRED", "RATE_LIMITED"].includes(code) || (code === "SUBDOMAIN_IN_USE" && !this.options.apiKey)) {
+    if (["AUTH_FAILED", "AUTH_REQUIRED", "LIMIT_EXCEEDED", "TUNNEL_EXPIRED", "RATE_LIMITED", "PASSWORD_REQUIRES_PAID",
+      "ORG_ACCESS_REQUIRES_PAID", "ORG_ACCESS_UNAVAILABLE", "INVALID_ACCESS"].includes(code) || (code === "SUBDOMAIN_IN_USE" && !this.options.apiKey)) {
       this.shouldReconnect = false;
       this.stop();
     }

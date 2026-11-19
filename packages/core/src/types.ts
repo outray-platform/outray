@@ -3,6 +3,12 @@
  */
 export type TunnelProtocol = "http" | "tcp" | "udp";
 
+/**
+ * Who may reach an HTTP tunnel. "organization" requires visitors to sign in
+ * with OutRay as a member of the tunnel's organization (paid plans only).
+ */
+export type TunnelAccess = "public" | "password" | "organization";
+
 // ============================================================================
 // Client Configuration
 // ============================================================================
@@ -51,6 +57,25 @@ export interface OutrayClientOptions {
   remotePort?: number;
 
   /**
+   * Password for Basic-auth protected HTTP tunnels (paid plans)
+   */
+  password?: string;
+
+  /**
+   * Who may reach the HTTP tunnel. "organization" asks visitors to sign in
+   * with OutRay and admits only members of the tunnel's organization.
+   * Requires an API key and a paid plan.
+   * @default 'public', or 'password' when a password is set
+   */
+  access?: TunnelAccess;
+
+  /**
+   * Path prefixes that skip organization sign-in, e.g. ['/webhooks'] for
+   * webhook senders. Anyone can reach these paths.
+   */
+  accessBypass?: string[];
+
+  /**
    * Callback fired when tunnel is successfully established
    */
   onTunnelReady?: (url: string, port?: number) => void;
@@ -59,6 +84,12 @@ export interface OutrayClientOptions {
    * Callback fired when tunnel encounters an error
    */
   onError?: (error: Error, code?: string) => void;
+
+  /**
+   * Callback fired with the effective access when the tunnel opens and when
+   * it is changed from the console
+   */
+  onAccessChange?: (access: TunnelAccess) => void;
 
   /**
    * Callback fired when tunnel is closed
@@ -100,6 +131,8 @@ export interface OpenTunnelMessage {
   protocol?: TunnelProtocol;
   remotePort?: number;
   password?: string;
+  access?: TunnelAccess;
+  accessBypass?: string[];
 }
 
 export interface TunnelResponseMessage {
@@ -170,6 +203,13 @@ export interface TunnelOpenedMessage {
   url: string;
   protocol?: TunnelProtocol;
   port?: number;
+  /** Effective access, which a setting saved in the console can override */
+  access?: TunnelAccess;
+}
+
+export interface AccessUpdatedMessage {
+  type: "access_updated";
+  access: TunnelAccess;
 }
 
 export interface TunnelDataMessage {
@@ -222,6 +262,7 @@ export interface WSUpgradeMessage {
 
 export type ServerMessage =
   | TunnelOpenedMessage
+  | AccessUpdatedMessage
   | TunnelDataMessage
   | TCPConnectionMessage
   | TCPIncomingDataMessage

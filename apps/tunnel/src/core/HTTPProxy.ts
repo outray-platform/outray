@@ -1,5 +1,5 @@
 import { IncomingMessage, ServerResponse } from "http";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID, timingSafeEqual } from "crypto";
 import fs from "fs";
 import path from "path";
 import { TunnelRouter } from "./TunnelRouter";
@@ -7,20 +7,30 @@ import { getBandwidthKey } from "../../../../shared/utils";
 import { logger, requestCaptureLogger } from "../lib/tinybird";
 import { LogManager } from "./LogManager";
 import publicHosts from "../../../../shared/public-hosts";
+import type { TunnelAccessGate } from "../lib/tunnel-access-gate";
+
+// Hashing first gives equal-length inputs, so neither content nor length leaks through timing.
+export function passwordsMatch(supplied: string, expected: string): boolean {
+  const digest = (value: string) => createHash("sha256").update(value).digest();
+  return timingSafeEqual(digest(supplied), digest(expected));
+}
 
 export class HTTPProxy {
   private router: TunnelRouter;
   private baseDomain: string;
   private logManager: LogManager;
+  private accessGate?: TunnelAccessGate;
 
   constructor(
     router: TunnelRouter,
     baseDomain: string,
     logManager: LogManager,
+    accessGate?: TunnelAccessGate,
   ) {
     this.router = router;
     this.baseDomain = baseDomain;
     this.logManager = logManager;
+    this.accessGate = accessGate;
   }
 
   async handleRequest(
@@ -62,6 +72,21 @@ export class HTTPProxy {
 
       const metadata = this.router.getTunnelMetadata(tunnelId);
 
+      if (metadata?.access === "organization") {
+        if (!this.accessGate) {
+          res.writeHead(503, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
+          res.end("Organization access is unavailable");
+          return;
+        }
+        const decision = await this.accessGate.authorizeRequest(req, cleanHost, metadata);
+        if (decision.action === "respond") {
+          res.writeHead(decision.status, decision.headers);
+          res.end(req.method === "HEAD" ? undefined : decision.body);
+          return;
+        }
+        this.accessGate.stripCookie(headers);
+      }
+
       if (metadata?.password) {
         const authHeader = req.headers.authorization;
         let authenticated = false;
@@ -72,9 +97,7 @@ export class HTTPProxy {
           const colonIdx = credentials.indexOf(":");
           if (colonIdx !== -1) {
             const password = credentials.substring(colonIdx + 1);
-            if (password === metadata.password) {
-              authenticated = true;
-            }
+            authenticated = passwordsMatch(password, metadata.password);
           }
         }
 

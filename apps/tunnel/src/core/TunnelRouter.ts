@@ -17,6 +17,8 @@ interface TunnelRouterOptions {
   ttlSeconds?: number;
   heartbeatIntervalMs?: number;
   requestTimeoutMs?: number;
+  organizationAccessAvailable?: () => boolean;
+  onAccessChanged?: (tunnelId: string) => void;
 }
 
 export interface TunnelMetadata {
@@ -28,6 +30,11 @@ export interface TunnelMetadata {
   plan?: string;
   fullCaptureEnabled?: boolean;
   password?: string;
+  access?: "public" | "password" | "organization";
+  accessBypass?: string[];
+  /** What the client asked for, restored when the console's setting is cleared. */
+  requestedAccess?: "public" | "password" | "organization";
+  requestedAccessBypass?: string[];
   expiresAt?: number;
   guestLeaseKey?: string;
   guestSessionId?: string;
@@ -46,6 +53,8 @@ export class TunnelRouter {
   private refreshing = false;
   private expiryTimers = new Map<string, NodeJS.Timeout>();
   private connectionIds = new WeakMap<WebSocket, string>();
+  private readonly organizationAccessAvailable: () => boolean;
+  private readonly onAccessChanged?: (tunnelId: string) => void;
 
   constructor(options: TunnelRouterOptions = {}) {
     this.redis = options.redis;
@@ -55,6 +64,8 @@ export class TunnelRouter {
       options.heartbeatIntervalMs ?? 20000,
     );
     this.requestTimeoutMs = options.requestTimeoutMs ?? 60000;
+    this.organizationAccessAvailable = options.organizationAccessAvailable ?? (() => false);
+    this.onAccessChanged = options.onAccessChanged;
 
     if (this.redis) {
       this.startHeartbeat();
@@ -89,7 +100,15 @@ export class TunnelRouter {
         type?: string;
         organizationId?: string;
         enabled?: boolean;
+        tunnelId?: string;
+        dbTunnelId?: string;
+        access?: string;
       };
+
+      if (controlMessage.type === "tunnel_access") {
+        this.applyAccessChange(controlMessage);
+        return;
+      }
 
       if (
         controlMessage.type !== "full_capture_setting" ||
@@ -118,6 +137,39 @@ export class TunnelRouter {
     } catch {
       // Ignore control messages owned by older or unrelated producers.
     }
+  }
+
+  /**
+   * Console-initiated access change for a live tunnel. The console also saves it
+   * for the hostname, so reconnects keep it; "default" restores what the client asked for.
+   * Password tunnels keep their mode.
+   */
+  applyAccessChange(
+    change: { tunnelId?: string; organizationId?: string; dbTunnelId?: string; access?: string },
+    { notifyClient = true }: { notifyClient?: boolean } = {},
+  ): boolean {
+    if (!change.tunnelId || !["public", "organization", "default"].includes(change.access ?? "")) return false;
+    const ws = this.tunnels.get(change.tunnelId);
+    const metadata = this.tunnelMetadata.get(change.tunnelId);
+    if (!ws || !metadata?.organizationId || metadata.organizationId !== change.organizationId ||
+        metadata.dbTunnelId !== change.dbTunnelId || metadata.access === "password" || metadata.password) {
+      return false;
+    }
+    const requested = metadata.requestedAccess === "organization" ? "organization" : "public";
+    const access = change.access === "default" ? requested : change.access as "public" | "organization";
+    if (access === "organization" && (!this.organizationAccessAvailable() || !metadata.plan || metadata.plan === "free")) {
+      return false;
+    }
+    const updated: TunnelMetadata = { ...metadata, access };
+    // Bypass prefixes belong to the client's own organization request.
+    if (access === "organization" && requested === "organization") updated.accessBypass = metadata.requestedAccessBypass;
+    else delete updated.accessBypass;
+    this.tunnelMetadata.set(change.tunnelId, updated);
+    void this.persistTunnelState(change.tunnelId, "XX", ws, updated);
+    if (notifyClient && ws.readyState === WebSocket.OPEN) ws.send(Protocol.encode({ type: "access_updated", access }));
+    this.onAccessChanged?.(change.tunnelId);
+    console.log(`Tunnel ${change.tunnelId} access set to ${access} from the console`);
+    return true;
   }
 
   getRedis(): Redis | undefined {
