@@ -5,7 +5,7 @@ import { matchesBypass, normalizeBypassPrefix, resolveTunnelAccess, safeReturnPa
 test("bypass prefixes must be plain absolute paths outside the reserved namespace", () => {
   assert.equal(normalizeBypassPrefix("/webhooks"), "/webhooks");
   assert.equal(normalizeBypassPrefix("/webhooks/stripe/"), "/webhooks/stripe");
-  for (const value of ["", "/", "//", "webhooks", "/a/../b", "/./a", "/a//b", "/a?b", "/a#b", "/a%2fb", "/a\\b", "/a b", "/_outray", "/_outray/callback", "/x".repeat(70), 1, null]) {
+  for (const value of ["", "/", "//", "webhooks", "/a/../b", "/./a", "/a//b", "/a?b", "/a#b", "/a%2fb", "/a\\b", "/a b", "/a;b", "/_outray", "/_outray/callback", "/x".repeat(70), 1, null]) {
     assert.equal(normalizeBypassPrefix(value), undefined, String(value));
   }
 });
@@ -16,7 +16,7 @@ test("bypass matching respects segment boundaries and refuses ambiguous paths", 
     assert.equal(matchesBypass(url, prefixes), true, url);
   }
   for (const url of ["/webhooksx", "/", "/admin", "/webhooks/../admin", "/webhooks/%2e%2e/admin", "/webhooks%2f..%2fadmin",
-    "/webhooks/..%2Fadmin", "/webhooks\\..\\admin", "//webhooks", "/webhooks//x", "http://evil/webhooks", "/WEBHOOKS"]) {
+    "/webhooks/..%2Fadmin", "/webhooks\\..\\admin", "/webhooks/..;/admin", "/webhooks;x/../admin", "/webhooks/%3b/x", "//webhooks", "/webhooks//x", "http://evil/webhooks", "/WEBHOOKS"]) {
     assert.equal(matchesBypass(url, prefixes), false, url);
   }
   assert.equal(matchesBypass("/webhooks", undefined), false);

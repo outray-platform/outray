@@ -9,7 +9,8 @@ export type AccessPolicyResult =
   | { ok: true; access: TunnelAccessMode; accessBypass?: string[] }
   | { ok: false; code: string; message: string };
 
-const PATH_CHARS = /^\/[A-Za-z0-9._~!$&'()*+,;=:@/-]*$/;
+// No ";": servlet containers treat "..;" as a dot segment.
+const PATH_CHARS = /^\/[A-Za-z0-9._~!$&'()*+,=:@/-]*$/;
 
 function hasDotSegment(path: string): boolean {
   return path.split("/").some(segment => segment === "." || segment === "..");
@@ -25,13 +26,13 @@ export function normalizeBypassPrefix(value: unknown): string | undefined {
 }
 
 /**
- * Encoded separators, backslashes and dot segments are never bypassed: the
- * local app may normalize them into a path outside the allowed prefix.
+ * Encoded separators, backslashes, matrix parameters and dot segments are never
+ * bypassed: the local app may normalize them into a path outside the allowed prefix.
  */
 export function matchesBypass(rawUrl: string | undefined, prefixes: readonly string[] | undefined): boolean {
   if (!prefixes?.length || !rawUrl?.startsWith("/")) return false;
   const path = rawUrl.split(/[?#]/, 1)[0];
-  if (/%(?:2e|2f|5c)/i.test(path) || path.includes("\\") || path.includes("//") || hasDotSegment(path)) return false;
+  if (/%(?:2e|2f|3b|5c)/i.test(path) || /[\\;]/.test(path) || path.includes("//") || hasDotSegment(path)) return false;
   return prefixes.some(prefix => path === prefix || path.startsWith(`${prefix}/`));
 }
 
