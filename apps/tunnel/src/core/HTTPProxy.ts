@@ -1,5 +1,5 @@
 import { IncomingMessage, ServerResponse } from "http";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID, timingSafeEqual } from "crypto";
 import fs from "fs";
 import path from "path";
 import { TunnelRouter } from "./TunnelRouter";
@@ -7,6 +7,12 @@ import { getBandwidthKey } from "../../../../shared/utils";
 import { logger, requestCaptureLogger } from "../lib/tinybird";
 import { LogManager } from "./LogManager";
 import publicHosts from "../../../../shared/public-hosts";
+
+// Hashing first gives equal-length inputs, so neither content nor length leaks through timing.
+export function passwordsMatch(supplied: string, expected: string): boolean {
+  const digest = (value: string) => createHash("sha256").update(value).digest();
+  return timingSafeEqual(digest(supplied), digest(expected));
+}
 
 export class HTTPProxy {
   private router: TunnelRouter;
@@ -72,9 +78,7 @@ export class HTTPProxy {
           const colonIdx = credentials.indexOf(":");
           if (colonIdx !== -1) {
             const password = credentials.substring(colonIdx + 1);
-            if (password === metadata.password) {
-              authenticated = true;
-            }
+            authenticated = passwordsMatch(password, metadata.password);
           }
         }
 
