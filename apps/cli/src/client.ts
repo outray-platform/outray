@@ -10,6 +10,7 @@ import type {
   WSCloseMessage,
 } from "@outray/core";
 import http from "http";
+import type { TunnelAccess } from "./tunnel-access";
 import { MDNSAdvertiser, LocalProxy, LocalHttpsProxy } from "./mdns";
 
 export class OutRayClient {
@@ -38,6 +39,8 @@ export class OutRayClient {
   private readonly PONG_TIMEOUT_MS = 10000; // 10 seconds to wait for pong
   private localWebSockets = new Map<string, WebSocket>();
   private password?: string;
+  private access?: TunnelAccess;
+  private accessBypass?: string[];
   private showQr: boolean;
 
   constructor(
@@ -50,6 +53,8 @@ export class OutRayClient {
     enableLocal: boolean = false,
     password?: string,
     showQr: boolean = false,
+    access?: TunnelAccess,
+    accessBypass?: string[],
   ) {
     this.localPort = localPort;
     this.serverUrl = serverUrl;
@@ -61,6 +66,8 @@ export class OutRayClient {
     this.enableLocal = enableLocal;
     this.password = password;
     this.showQr = showQr;
+    this.access = access;
+    this.accessBypass = accessBypass?.length ? accessBypass : undefined;
   }
 
   public start(): void {
@@ -196,15 +203,18 @@ export class OutRayClient {
     console.log(chalk.green(`Linked to your local port ${this.localPort}`));
     this.startPing();
 
-    const handshake = encodeMessage({
-      type: "open_tunnel",
+    // Built separately: access fields are newer than the published @outray/core message type.
+    const open = {
+      type: "open_tunnel" as const,
       apiKey: this.apiKey,
       subdomain: this.subdomain,
       customDomain: this.customDomain,
       forceTakeover: this.forceTakeover,
       password: this.password,
-    });
-    this.ws?.send(handshake);
+      access: this.access,
+      accessBypass: this.accessBypass,
+    };
+    this.ws?.send(encodeMessage(open));
   }
 
   private async handleMessage(data: string): Promise<void> {
@@ -283,6 +293,11 @@ export class OutRayClient {
           this.stop();
           process.exit(1);
         } else if (message.code === "LIMIT_EXCEEDED") {
+          console.log(chalk.red(`❌ Error: ${message.message}`));
+          this.shouldReconnect = false;
+          this.stop();
+          process.exit(1);
+        } else if (["ORG_ACCESS_REQUIRES_PAID", "ORG_ACCESS_UNAVAILABLE", "INVALID_ACCESS"].includes(message.code)) {
           console.log(chalk.red(`❌ Error: ${message.message}`));
           this.shouldReconnect = false;
           this.stop();

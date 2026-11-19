@@ -8,6 +8,7 @@ import { UDPTunnelClient } from "./udp-client";
 import { ConfigManager, OutRayConfig, canonicalConsoleOrigin } from "./config";
 import { AuthManager } from "./auth";
 import { TomlConfigParser, ParsedTunnelConfig } from "./toml-config";
+import { resolveAccessOptions } from "./tunnel-access";
 import { runSecretsCommand } from "./secrets-cli";
 import { version } from "../package.json";
 
@@ -26,6 +27,15 @@ function getFlagValue(args: string[], flag: string): string | undefined {
     return undefined;
   }
   return next;
+}
+
+function getFlagValues(args: string[], flag: string): string[] {
+  const values: string[] = [];
+  args.forEach((arg, index) => {
+    if (arg.startsWith(`${flag}=`)) values.push(arg.slice(flag.length + 1));
+    else if (arg === flag && args[index + 1] && !args[index + 1].startsWith("--")) values.push(args[index + 1]);
+  });
+  return values;
 }
 
 function hasFlag(args: string[], flag: string): boolean {
@@ -386,6 +396,9 @@ async function handleStartFromConfig(
         false, // noLog
         tunnel.local, // enableLocal
         tunnel.password,
+        false,
+        tunnel.access,
+        tunnel.accessBypass,
       );
     }
 
@@ -444,6 +457,8 @@ function printHelp() {
     chalk.cyan("  --remote-port <port>   Remote port (TCP/UDP only)"),
   );
   console.log(chalk.cyan("  --password <password>  Password protect HTTP tunnel"));
+  console.log(chalk.cyan("  --access <mode>        public, password or org (org members only; paid)"));
+  console.log(chalk.cyan("  --access-bypass <path> Path prefix exempt from org sign-in (repeatable)"));
   console.log(chalk.cyan("  --key <token>          Override auth token"));
   console.log(
     chalk.cyan("  --no-logs              Disable tunnel request logs"),
@@ -653,6 +668,21 @@ async function main() {
   const subdomain = getFlagValue(remainingArgs, "--subdomain");
   const customDomain = getFlagValue(remainingArgs, "--domain");
   const password = getFlagValue(remainingArgs, "--password");
+  if (remainingArgs.some(arg => arg === "--access" || arg.startsWith("--access=")) && !getFlagValue(remainingArgs, "--access")) {
+    console.log(chalk.red("❌ --access requires a mode: public, password or org"));
+    process.exit(1);
+  }
+  const accessOptions = resolveAccessOptions({
+    access: getFlagValue(remainingArgs, "--access"),
+    accessBypass: getFlagValues(remainingArgs, "--access-bypass"),
+    password,
+    protocol: tunnelProtocol,
+  });
+  if (!accessOptions.ok) {
+    console.log(chalk.red(`❌ ${accessOptions.error}`));
+    process.exit(1);
+  }
+  const { access, accessBypass } = accessOptions;
 
   // Handle --remote-port flag for TCP/UDP tunnels
   const remotePortValue = getFlagValue(remainingArgs, "--remote-port");
@@ -758,7 +788,7 @@ async function main() {
   let config = configManager.load();
 
   if (!config && !keyValue) {
-    if (tunnelProtocol !== "http" || customDomain || password || tempOrgSlug) {
+    if (tunnelProtocol !== "http" || customDomain || password || tempOrgSlug || (access && access !== "public")) {
       console.log(chalk.red("❌ This tunnel feature requires authentication. Run: outray login"));
       process.exit(1);
     }
@@ -846,6 +876,8 @@ async function main() {
       enableLocal,
       password,
       showQr,
+      access,
+      accessBypass,
     );
   }
 

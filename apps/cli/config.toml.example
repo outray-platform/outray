@@ -18,6 +18,10 @@ custom_domain = "app.example.com"
 protocol = "http"
 local_port = 8000
 subdomain = "api"
+# Only signed-in members of the organization can reach it (paid plans).
+# access_bypass paths stay public so webhook senders keep working.
+access = "org"
+access_bypass = ["/webhooks"]
 
 [tunnel.postgres]
 protocol = "tcp"
