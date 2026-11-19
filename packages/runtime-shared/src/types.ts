@@ -1,4 +1,5 @@
 export type TunnelProtocol = "http" | "tcp" | "udp";
+export type TunnelAccess = "public" | "password" | "organization";
 
 export interface HelloMessage {
   type: "hello";
@@ -15,6 +16,10 @@ export interface OpenTunnelMessage {
   protocol?: TunnelProtocol;
   remotePort?: number; // For TCP/UDP: the port to expose on the server
   password?: string;
+  /** Defaults to "password" when a password is set, otherwise "public". */
+  access?: TunnelAccess;
+  /** Path prefixes served without organization sign-in, e.g. ["/webhooks"]. */
+  accessBypass?: string[];
 }
 
 export interface TunnelOpenedMessage {

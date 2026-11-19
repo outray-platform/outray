@@ -19,6 +19,7 @@ export type {
   OutrayClientOptions,
   RequestInfo,
   TunnelProtocol,
+  TunnelAccess,
   // Protocol messages
   ClientMessage,
   ServerMessage,

@@ -3,6 +3,12 @@
  */
 export type TunnelProtocol = "http" | "tcp" | "udp";
 
+/**
+ * Who may reach an HTTP tunnel. "organization" requires visitors to sign in
+ * with OutRay as a member of the tunnel's organization (paid plans only).
+ */
+export type TunnelAccess = "public" | "password" | "organization";
+
 // ============================================================================
 // Client Configuration
 // ============================================================================
@@ -100,6 +106,8 @@ export interface OpenTunnelMessage {
   protocol?: TunnelProtocol;
   remotePort?: number;
   password?: string;
+  access?: TunnelAccess;
+  accessBypass?: string[];
 }
 
 export interface TunnelResponseMessage {
