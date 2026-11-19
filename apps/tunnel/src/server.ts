@@ -82,7 +82,7 @@ const logManager = new LogManager();
 const webApiUrl = process.env.WEB_API_URL || "http://localhost:3000/api";
 const internalApiSecret = process.env.INTERNAL_API_SECRET;
 const accessGate = new TunnelAccessGate({
-  consoleUrl: config.accessConsoleUrl,
+  consoleUrl: config.dashboardUrl,
   apiUrl: webApiUrl,
   internalApiSecret,
   cookieSecret: config.accessCookieSecret,
@@ -111,7 +111,7 @@ const udpProxy = new UDPProxy(
 const wsProxy = new WSProxy(router, accessGate, config.accessRevalidateSeconds * 1000);
 const wsHandler = new WSHandler(wssTunnel, router, tcpProxy, udpProxy, wsProxy, () => accessGate.configured);
 if (!accessGate.configured) {
-  console.log("Organization-only tunnels disabled: set TUNNEL_ACCESS_CONSOLE_URL (or OUTRAY_DASHBOARD_URL) and INTERNAL_API_SECRET");
+  console.log("Organization-only tunnels disabled: set OUTRAY_DASHBOARD_URL and INTERNAL_API_SECRET");
 }
 
 console.log("✅ TCP/UDP tunnel support enabled");

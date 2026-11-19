@@ -15,8 +15,8 @@ export const config = {
     10,
   ),
   requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || "60000", 10),
-  // Public console origin for "Login with OutRay" redirects on organization-only tunnels.
-  accessConsoleUrl: process.env.TUNNEL_ACCESS_CONSOLE_URL || process.env.OUTRAY_DASHBOARD_URL || "",
+  // Public console origin, also used for "Login with OutRay" redirects on organization-only tunnels.
+  dashboardUrl: process.env.OUTRAY_DASHBOARD_URL || "",
   accessCookieSecret: process.env.TUNNEL_ACCESS_COOKIE_SECRET || "",
   accessRevalidateSeconds: Math.max(30, parseInt(process.env.TUNNEL_ACCESS_REVALIDATE_SECONDS || "300", 10) || 300),
   tinybirdApiHost: (process.env.TINYBIRD_API_HOST || "").replace(/\/$/, ""),
