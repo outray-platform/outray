@@ -110,7 +110,9 @@ test("malformed callback requests never reach the console", { timeout: 5000 }, a
   for (const path of ["/_outray/callback", "/_outray/callback?code=short", `/_outray/callback?code=${"*".repeat(43)}`]) {
     assert.equal((await f.send(HOST, path, navigate)).status, 400);
   }
-  assert.equal((await f.send(HOST, `/_outray/callback?code=${"a".repeat(43)}`, {}, "POST")).status, 405);
+  for (const method of ["POST", "HEAD"]) {
+    assert.equal((await f.send(HOST, `/_outray/callback?code=${"a".repeat(43)}`, {}, method)).status, 405, method);
+  }
   assert.equal(f.console.calls.length, 0);
 });
 

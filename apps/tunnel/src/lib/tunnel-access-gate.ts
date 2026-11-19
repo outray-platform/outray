@@ -150,7 +150,8 @@ export class TunnelAccessGate {
   }
 
   private async callback(req: IncomingMessage, host: string, organizationId: string): Promise<AccessDecision> {
-    if (req.method !== "GET" && req.method !== "HEAD") return respond(405, "Method not allowed", { Allow: "GET, HEAD" });
+    // HEAD would let link prefetchers burn the single-use code.
+    if (req.method !== "GET") return respond(405, "Method not allowed", { Allow: "GET" });
     const code = new URL(req.url || "/", "https://tunnel.invalid").searchParams.get("code");
     if (!code || !CODE_PATTERN.test(code)) return respond(400, "Invalid sign-in link");
 
@@ -165,7 +166,7 @@ export class TunnelAccessGate {
     }
     if (result?.valid !== true || typeof result.userId !== "string" || !result.userId ||
         typeof result.organizationId !== "string" || !equal(result.organizationId, organizationId)) {
-      return respond(403, "This sign-in link is invalid, expired or was already used. Reload the page to sign in again.", { "Referrer-Policy": "no-referrer" });
+      return respond(403, "This sign-in link is invalid, expired or was already used. Open the tunnel address again to sign in.", { "Referrer-Policy": "no-referrer" });
     }
     const identity = { host, userId: result.userId, organizationId };
     this.remember(identity);
