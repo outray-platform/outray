@@ -6,6 +6,7 @@ import type { TestContext } from "node:test";
 import WebSocket, { WebSocketServer } from "ws";
 import { TunnelRouter, type TunnelMetadata } from "../../src/core/TunnelRouter";
 import { LogManager } from "../../src/core/LogManager";
+import { WSProxy } from "../../src/core/WSProxy";
 import { TunnelAccessGate, type TunnelAccessGateOptions } from "../../src/lib/tunnel-access-gate";
 import { loadHTTPProxy } from "./http-proxy";
 
@@ -75,24 +76,45 @@ export async function accessFixture(t: TestContext, options: Partial<TunnelAcces
   const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   const wsPort = await listen(t, wss);
   const received: Array<{ host: string; path: string; headers: Record<string, string | string[]> }> = [];
+  const upgrades: Array<{ host: string; path: string; headers: Record<string, string | string[]> }> = [];
+  const wsProxy = new WSProxy(router, gate, 60_000);
+  const visitors: WebSocket[] = [];
+  const hosts: string[] = [];
+  // Upgraded sockets are detached from the HTTP server, so they must close before it can.
+  t.after(() => {
+    wsProxy.shutdown();
+    for (const ws of visitors) ws.terminate();
+    for (const host of hosts) wsProxy.cleanupTunnel(host);
+  });
 
   async function tunnel(host: string, metadata: TunnelMetadata = {}) {
+    hosts.push(host);
     const accepted = once(wss, "connection");
     const client = new WebSocket(`ws://127.0.0.1:${wsPort}`);
     const [edge] = await accepted as [WebSocket];
     client.on("message", data => {
       const message = JSON.parse(String(data));
+      if (message.type === "ws_upgrade") {
+        upgrades.push({ host, path: message.path, headers: message.headers });
+        client.send(JSON.stringify({ type: "ws_upgrade_response", wsConnectionId: message.wsConnectionId, success: true }));
+        return;
+      }
       if (message.type !== "request") return;
       received.push({ host, path: message.path, headers: message.headers });
       client.send(JSON.stringify({ type: "response", requestId: message.requestId, statusCode: 200, headers: { "content-type": "text/plain" }, body: Buffer.from(`app:${message.path}`).toString("base64") }));
     });
-    edge.on("message", data => router.handleMessage(host, JSON.parse(String(data)), edge));
+    edge.on("message", data => {
+      const message = JSON.parse(String(data));
+      if (message.type === "ws_upgrade_response") wsProxy.handleUpgradeResponse(message, edge);
+      else router.handleMessage(host, message, edge);
+    });
     assert.ok(await router.registerTunnel(host, edge, { organizationId: ORG, plan: "pro", access: "organization", ...metadata }));
     return { client, edge };
   }
 
   const proxy = new HTTPProxy(router, "example.test", new LogManager(), gate);
   const server = createServer((req, res) => void proxy.handleRequest(req, res));
+  server.on("upgrade", (req, socket, head) => void wsProxy.handleUpgrade(req, socket, head));
   const port = await listen(t, server);
 
   function send(host: string, path: string, headers: Record<string, string> = {}, method = "GET"): Promise<HttpResult> {
@@ -105,6 +127,17 @@ export async function accessFixture(t: TestContext, options: Partial<TunnelAcces
     });
   }
 
+  /** Resolves with the opened socket, or the HTTP status the upgrade was refused with. */
+  function upgrade(host: string, path: string, headers: Record<string, string> = {}): Promise<WebSocket | number> {
+    return new Promise(resolve => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, { headers: { host, ...headers } });
+      ws.on("open", () => resolve(ws));
+      ws.on("unexpected-response", (_req, res) => { resolve(res.statusCode!); res.resume(); });
+      ws.on("error", () => {});
+      visitors.push(ws);
+    });
+  }
+
   async function signIn(host: string, returnPath = "/") {
     const response = await send(host, `/_outray/callback?code=${console_.issue(host, returnPath)}`, navigate);
     assert.equal(response.status, 302);
@@ -113,7 +146,7 @@ export async function accessFixture(t: TestContext, options: Partial<TunnelAcces
   }
 
   return {
-    gate, router, console: console_, received, tunnel, send, signIn, wsPort, httpPort: port,
+    gate, router, wsProxy, console: console_, received, upgrades, tunnel, send, upgrade, signIn,
     advance(ms: number) { now += ms; },
   };
 }

@@ -107,7 +107,7 @@ const udpProxy = new UDPProxy(
   redis,
 );
 
-const wsProxy = new WSProxy(router);
+const wsProxy = new WSProxy(router, accessGate, config.accessRevalidateSeconds * 1000);
 const wsHandler = new WSHandler(wssTunnel, router, tcpProxy, udpProxy, wsProxy, () => accessGate.configured);
 if (!accessGate.configured) {
   console.log("Organization-only tunnels disabled: set TUNNEL_ACCESS_CONSOLE_URL (or OUTRAY_DASHBOARD_URL) and INTERNAL_API_SECRET");
@@ -222,7 +222,10 @@ httpServer.on("upgrade", (request, socket, head) => {
     });
   } else {
     // End-user WebSocket to a tunneled subdomain
-    wsProxy.handleUpgrade(request, socket, head);
+    await wsProxy.handleUpgrade(request, socket, head).catch((error) => {
+      console.error("WebSocket upgrade failed:", error);
+      socket.destroy();
+    });
   }
   })();
 });
@@ -292,6 +295,7 @@ httpServer.listen(config.port, config.bindHost, () => {
 const shutdown = async () => {
   console.log("Shutting down tunnel server...");
   wsHandler.shutdown();
+  wsProxy.shutdown();
   await router.shutdown();
   await closeStatusRouting();
   
