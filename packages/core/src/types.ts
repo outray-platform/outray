@@ -57,6 +57,25 @@ export interface OutrayClientOptions {
   remotePort?: number;
 
   /**
+   * Password for Basic-auth protected HTTP tunnels (paid plans)
+   */
+  password?: string;
+
+  /**
+   * Who may reach the HTTP tunnel. "organization" asks visitors to sign in
+   * with OutRay and admits only members of the tunnel's organization.
+   * Requires an API key and a paid plan.
+   * @default 'public', or 'password' when a password is set
+   */
+  access?: TunnelAccess;
+
+  /**
+   * Path prefixes that skip organization sign-in, e.g. ['/webhooks'] for
+   * webhook senders. Anyone can reach these paths.
+   */
+  accessBypass?: string[];
+
+  /**
    * Callback fired when tunnel is successfully established
    */
   onTunnelReady?: (url: string, port?: number) => void;

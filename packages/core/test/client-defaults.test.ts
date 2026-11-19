@@ -46,3 +46,24 @@ test("a policy close without an error frame stops SDK guest reconnection", () =>
   assert.equal(control.shouldReconnect, false);
   assert.equal(control.reconnectTimeout, null);
 });
+
+test("access options are sent in the open_tunnel handshake", () => {
+  const sent: string[] = [];
+  const client = new OutrayClient({ localPort: 3000, apiKey: "key", access: "organization", accessBypass: ["/webhooks"] });
+  const control = client as unknown as { ws: { send(data: string): void }; handleOpen(): void; startPing(): void };
+  control.startPing = () => {};
+  control.ws = { send: data => { sent.push(data); } };
+  control.handleOpen();
+  const handshake = JSON.parse(sent[0]);
+  assert.equal(handshake.access, "organization");
+  assert.deepEqual(handshake.accessBypass, ["/webhooks"]);
+});
+
+test("organization access policy errors stop SDK auto-reconnect", () => {
+  for (const code of ["ORG_ACCESS_REQUIRES_PAID", "ORG_ACCESS_UNAVAILABLE", "INVALID_ACCESS"]) {
+    const client = new OutrayClient({ localPort: 3000, apiKey: "key" });
+    const control = client as unknown as { handleMessage(message: string): void; shouldReconnect: boolean };
+    control.handleMessage(JSON.stringify({ type: "error", code, message: "denied" }));
+    assert.equal(control.shouldReconnect, false, code);
+  }
+});

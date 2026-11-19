@@ -134,6 +134,9 @@ export class OutrayClient {
       forceTakeover: this.forceTakeover,
       protocol: this.options.protocol,
       remotePort: this.options.remotePort,
+      password: this.options.password,
+      access: this.options.access,
+      accessBypass: this.options.accessBypass?.length ? this.options.accessBypass : undefined,
     });
     this.ws?.send(handshake);
   }
@@ -180,7 +183,8 @@ export class OutrayClient {
     this.options.onError?.(new Error(message), code);
 
     // Fatal errors - stop reconnecting
-    if (["AUTH_FAILED", "AUTH_REQUIRED", "LIMIT_EXCEEDED", "TUNNEL_EXPIRED", "RATE_LIMITED"].includes(code) || (code === "SUBDOMAIN_IN_USE" && !this.options.apiKey)) {
+    if (["AUTH_FAILED", "AUTH_REQUIRED", "LIMIT_EXCEEDED", "TUNNEL_EXPIRED", "RATE_LIMITED", "PASSWORD_REQUIRES_PAID",
+      "ORG_ACCESS_REQUIRES_PAID", "ORG_ACCESS_UNAVAILABLE", "INVALID_ACCESS"].includes(code) || (code === "SUBDOMAIN_IN_USE" && !this.options.apiKey)) {
       this.shouldReconnect = false;
       this.stop();
     }
