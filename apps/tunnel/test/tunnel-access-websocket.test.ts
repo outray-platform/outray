@@ -55,3 +55,17 @@ test("open WebSockets close when membership is revoked", { timeout: 5000 }, asyn
   const [code] = await closed;
   assert.equal(code, 1008);
 });
+
+test("sockets opened while a tunnel was public close when it becomes organization-only, except bypass paths", { timeout: 5000 }, async t => {
+  const f = await accessFixture(t);
+  await f.tunnel(HOST, { access: "public", dbTunnelId: "db-a" });
+  const open = await f.upgrade(HOST, "/socket");
+  const hook = await f.upgrade(HOST, "/hooks/live");
+  assert.ok(open instanceof WebSocket && hook instanceof WebSocket);
+  f.router.getTunnelMetadata(HOST)!.accessBypass = ["/hooks"];
+  f.router.getTunnelMetadata(HOST)!.access = "organization";
+  const closed = once(open, "close");
+  await f.wsProxy.recheckAccess(HOST);
+  assert.equal((await closed)[0], 1008);
+  assert.equal(hook.readyState, WebSocket.OPEN);
+});

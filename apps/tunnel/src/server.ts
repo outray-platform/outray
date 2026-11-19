@@ -76,6 +76,7 @@ const router = new TunnelRouter({
   heartbeatIntervalMs: config.redisHeartbeatIntervalMs,
   requestTimeoutMs: config.requestTimeoutMs,
   organizationAccessAvailable: () => accessGate.configured,
+  onAccessChanged: (tunnelId) => void wsProxy.recheckAccess(tunnelId),
 });
 const httpServer = createServer();
 const logManager = new LogManager();
@@ -188,6 +189,8 @@ wssDashboard.on("connection", async (ws, req) => {
 });
 
 httpServer.on("upgrade", (request, socket, head) => {
+  // Node drops its own error listener before "upgrade"; a reset during an awaited access check must not crash the edge.
+  socket.on("error", () => socket.destroy());
   void (async () => {
   const host = normalizeHost(request.headers.host);
   const { pathname } = new URL(request.url || "", "http://localhost");
