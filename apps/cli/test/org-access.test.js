@@ -99,3 +99,15 @@ test("config.toml accepts organization access and rejects conflicting settings",
   writeFileSync(file, '[tunnel.web]\nprotocol = "http"\nlocal_port = 3000\naccess = "org"\npassword = "x"\n');
   assert.throws(() => TomlConfigParser.loadTomlConfig(file), /access org and password cannot be used together/i);
 });
+
+test("the CLI reports access saved or changed in the console", { timeout: 5000 }, async t => {
+  const server = await edge(t, ws => {
+    ws.send(JSON.stringify({ type: "tunnel_opened", tunnelId: "app.example.test", url: "https://app.example.test", access: "organization" }));
+    ws.send(JSON.stringify({ type: "access_updated", access: "public" }));
+    ws.send(JSON.stringify({ type: "error", code: "AUTH_FAILED", message: "stop" }));
+  });
+  const f = cli(t, ["3000", "--key", "token"], server.url);
+  await once(f.child, "close");
+  assert.match(f.output(), /Access: organization members only \(saved for this address in the console/);
+  assert.match(f.output(), /Access changed in the console: public/);
+});

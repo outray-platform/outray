@@ -234,6 +234,7 @@ export class OutRayClient {
         this.forceTakeover = false;
         this.reconnectAttempts = 0;
         console.log(chalk.magenta(`✨ Tunnel ready: ${message.url}`));
+        this.reportAccess((message as { access?: string }).access, false);
         console.log(
           chalk.yellow("Keep this running to keep your tunnel active."),
         );
@@ -315,6 +316,8 @@ export class OutRayClient {
         } else {
           console.log(chalk.red(`❌ Error: ${message.message}`));
         }
+      } else if ((message.type as string) === "access_updated") {
+        this.reportAccess((message as { access?: string }).access, true);
       } else if (message.type === "request") {
         this.handleTunnelData(message);
       } else if (message.type === "ws_upgrade") {
@@ -326,6 +329,19 @@ export class OutRayClient {
       }
     } catch (error) {
       console.log(chalk.red(`❌ Failed to parse message: ${error}`));
+    }
+  }
+
+  private reportAccess(access: string | undefined, changed: boolean): void {
+    if (!access) return;
+    const requested = this.access ?? (this.password ? "password" : "public");
+    const label = access === "organization" ? "organization members only" : access === "password" ? "password protected" : "public";
+    if (changed) {
+      console.log(chalk.yellow(`Access changed in the console: ${label}`));
+    } else if (access !== requested) {
+      console.log(chalk.yellow(`Access: ${label} (saved for this address in the console; it overrides --access)`));
+    } else if (access === "organization") {
+      console.log(chalk.dim("Access: organization members only"));
     }
   }
 
