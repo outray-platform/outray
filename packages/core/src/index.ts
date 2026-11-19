@@ -25,6 +25,7 @@ export type {
   ServerMessage,
   OpenTunnelMessage,
   TunnelOpenedMessage,
+  AccessUpdatedMessage,
   TunnelDataMessage,
   TunnelResponseMessage,
   TCPConnectionMessage,

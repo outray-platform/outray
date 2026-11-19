@@ -67,3 +67,12 @@ test("organization access policy errors stop SDK auto-reconnect", () => {
     assert.equal(control.shouldReconnect, false, code);
   }
 });
+
+test("SDK callers hear the effective access on open and on console changes", () => {
+  const seen: string[] = [];
+  const client = new OutrayClient({ localPort: 3000, apiKey: "key", onAccessChange: access => { seen.push(access); } });
+  const control = client as unknown as { handleMessage(message: string): void };
+  control.handleMessage(JSON.stringify({ type: "tunnel_opened", url: "https://app.example.test", access: "organization" }));
+  control.handleMessage(JSON.stringify({ type: "access_updated", access: "public" }));
+  assert.deepEqual(seen, ["organization", "public"]);
+});

@@ -154,6 +154,9 @@ export class OutrayClient {
         this.forceTakeover = false;
         this.reconnectAttempts = 0;
         this.options.onTunnelReady?.(message.url, message.port);
+        if (message.access) this.options.onAccessChange?.(message.access);
+      } else if (message.type === "access_updated") {
+        this.options.onAccessChange?.(message.access);
       } else if (message.type === "error") {
         this.handleError(message.code, message.message);
       } else if (message.type === "request") {

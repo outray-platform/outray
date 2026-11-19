@@ -86,6 +86,12 @@ export interface OutrayClientOptions {
   onError?: (error: Error, code?: string) => void;
 
   /**
+   * Callback fired with the effective access when the tunnel opens and when
+   * it is changed from the console
+   */
+  onAccessChange?: (access: TunnelAccess) => void;
+
+  /**
    * Callback fired when tunnel is closed
    */
   onClose?: (reason?: string) => void;
@@ -197,6 +203,13 @@ export interface TunnelOpenedMessage {
   url: string;
   protocol?: TunnelProtocol;
   port?: number;
+  /** Effective access, which a setting saved in the console can override */
+  access?: TunnelAccess;
+}
+
+export interface AccessUpdatedMessage {
+  type: "access_updated";
+  access: TunnelAccess;
 }
 
 export interface TunnelDataMessage {
@@ -249,6 +262,7 @@ export interface WSUpgradeMessage {
 
 export type ServerMessage =
   | TunnelOpenedMessage
+  | AccessUpdatedMessage
   | TunnelDataMessage
   | TCPConnectionMessage
   | TCPIncomingDataMessage
