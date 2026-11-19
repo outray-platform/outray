@@ -31,6 +31,9 @@ export interface TunnelMetadata {
   password?: string;
   access?: "public" | "password" | "organization";
   accessBypass?: string[];
+  /** What the client asked for, restored when the console's setting is cleared. */
+  requestedAccess?: "public" | "password" | "organization";
+  requestedAccessBypass?: string[];
   expiresAt?: number;
   guestLeaseKey?: string;
   guestSessionId?: string;
@@ -134,25 +137,31 @@ export class TunnelRouter {
   }
 
   /**
-   * Console-initiated switch between public and organization access for a live
-   * tunnel. Password tunnels keep their mode; the CLI's choice applies again on reconnect.
+   * Console-initiated access change for a live tunnel. The console also saves it
+   * for the hostname, so reconnects keep it; "default" restores what the client asked for.
+   * Password tunnels keep their mode.
    */
   applyAccessChange(change: { tunnelId?: string; organizationId?: string; dbTunnelId?: string; access?: string }): boolean {
-    if (!change.tunnelId || (change.access !== "public" && change.access !== "organization")) return false;
+    if (!change.tunnelId || !["public", "organization", "default"].includes(change.access ?? "")) return false;
     const ws = this.tunnels.get(change.tunnelId);
     const metadata = this.tunnelMetadata.get(change.tunnelId);
     if (!ws || !metadata?.organizationId || metadata.organizationId !== change.organizationId ||
         metadata.dbTunnelId !== change.dbTunnelId || metadata.access === "password" || metadata.password) {
       return false;
     }
-    if (change.access === "organization" && (!this.organizationAccessAvailable() || !metadata.plan || metadata.plan === "free")) {
+    const requested = metadata.requestedAccess === "organization" ? "organization" : "public";
+    const access = change.access === "default" ? requested : change.access as "public" | "organization";
+    if (access === "organization" && (!this.organizationAccessAvailable() || !metadata.plan || metadata.plan === "free")) {
       return false;
     }
-    const updated: TunnelMetadata = { ...metadata, access: change.access };
-    if (change.access === "public") delete updated.accessBypass;
+    const updated: TunnelMetadata = { ...metadata, access };
+    // Bypass prefixes belong to the client's own organization request.
+    if (access === "organization" && requested === "organization") updated.accessBypass = metadata.requestedAccessBypass;
+    else delete updated.accessBypass;
     this.tunnelMetadata.set(change.tunnelId, updated);
     void this.persistTunnelState(change.tunnelId, "XX", ws, updated);
-    console.log(`Tunnel ${change.tunnelId} access set to ${change.access} from the console`);
+    if (ws.readyState === WebSocket.OPEN) ws.send(Protocol.encode({ type: "access_updated", access }));
+    console.log(`Tunnel ${change.tunnelId} access set to ${access} from the console`);
     return true;
   }
 

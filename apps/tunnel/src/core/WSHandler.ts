@@ -226,6 +226,18 @@ export class WSHandler {
     }
   }
 
+  /** The console's saved access for a hostname, or null. Throws when the console can't answer. */
+  private async fetchAccessOverride(organizationId: string, host: string): Promise<"public" | "organization" | null> {
+    const response = await fetch(`${this.webApiUrl}/tunnel/access/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.INTERNAL_API_SECRET ?? ""}` },
+      body: JSON.stringify({ organizationId, host }),
+    });
+    if (!response.ok) throw new Error(`Access settings lookup failed: ${response.status}`);
+    const body = await response.json() as { access?: unknown };
+    return body?.access === "public" || body?.access === "organization" ? body.access : null;
+  }
+
   private async verifyCustomDomain(
     domain: string,
     organizationId: string,
@@ -366,7 +378,33 @@ export class WSHandler {
               ws.close(1008, "Organization access unavailable");
               return;
             }
-            const access = { access: accessPolicy.access, accessBypass: accessPolicy.accessBypass };
+            const requested = {
+              access: accessPolicy.access,
+              accessBypass: accessPolicy.accessBypass,
+              requestedAccess: accessPolicy.access,
+              requestedAccessBypass: accessPolicy.accessBypass,
+            };
+            let access = requested;
+            // Resolved before an address is reserved, so a console-gated address is never briefly public.
+            const accessFor = async (hostname: string): Promise<{ ok: true; value: typeof requested } | { ok: false; code: string; message: string }> => {
+              if (!organizationId || tunnelProtocol !== "http" || requested.access === "password") return { ok: true, value: requested };
+              let override: "public" | "organization" | null;
+              try {
+                override = await this.fetchAccessOverride(organizationId, hostname);
+              } catch (error) {
+                console.error("Failed to load tunnel access settings:", error);
+                return { ok: false, code: "TUNNEL_UNAVAILABLE", message: "Could not load this tunnel's access settings. Try again." };
+              }
+              if (!override || override === requested.access) return { ok: true, value: requested };
+              if (override === "public") return { ok: true, value: { ...requested, access: "public", accessBypass: undefined } };
+              if (!plan || plan === "free") {
+                return { ok: false, code: "ORG_ACCESS_REQUIRES_PAID", message: "This address is set to organization-only in the console, which requires a paid plan. Change it in the console or upgrade." };
+              }
+              if (!this.organizationAccessAvailable()) {
+                return { ok: false, code: "ORG_ACCESS_UNAVAILABLE", message: "This address is set to organization-only, which this server doesn't support" };
+              }
+              return { ok: true, value: { ...requested, access: "organization", accessBypass: undefined } };
+            };
 
             // Gate password protection: only paid plans can use --password
             if (message.password && (!plan || plan === "free")) {
@@ -452,6 +490,14 @@ export class WSHandler {
                 return;
               }
 
+              const resolved = await accessFor(message.customDomain);
+              if (!resolved.ok) {
+                ws.send(Protocol.encode({ type: "error", code: resolved.code, message: resolved.message }));
+                ws.close(1008, "Tunnel access policy rejected");
+                return;
+              }
+              access = resolved.value;
+
               // Use custom domain as tunnel ID
               tunnelId = message.customDomain;
               extWs.tunnelId = message.customDomain; // Track for heartbeat logging
@@ -525,6 +571,7 @@ export class WSHandler {
                   tunnelId,
                   url: tunnelUrl,
                   plan,
+                  access: access.access,
                 }),
               );
               console.log(`Tunnel opened with custom domain: ${tunnelId}`);
@@ -534,12 +581,15 @@ export class WSHandler {
             let requestedSubdomain = message.subdomain;
             let reservationAcquired = false;
 
-            const reserve = async (subdomain: string) => {
+            const reserve = async (subdomain: string): Promise<{ reserved: boolean; code?: string; error?: string; fatal?: boolean }> => {
+              const resolved = await accessFor(`${subdomain}.${config.baseDomain}`);
+              if (!resolved.ok) return { reserved: false, code: resolved.code, error: resolved.message, fatal: true };
               allocated.add(`${subdomain}.${config.baseDomain}`);
               const result = await this.reserveSubdomain(subdomain, ws, {
                 organizationId, userId, bandwidthLimit, retentionDays, fullCaptureEnabled,
-                ...guestLease, password: message.password, ...access,
+                ...guestLease, password: message.password, ...resolved.value,
               }, message.forceTakeover || false);
+              if (result.reserved) access = resolved.value;
               return result;
             };
             if (requestedSubdomain) {
@@ -554,6 +604,11 @@ export class WSHandler {
               for (let attempt = 0; attempt < 6 && !closed; attempt++) {
                 const candidate = attempt === 5 ? `tunnel-${randomUUID()}` : generateSubdomain();
                 const result = await reserve(candidate);
+                if (result.fatal) {
+                  ws.send(Protocol.encode({ type: "error", code: result.code!, message: result.error! }));
+                  ws.close(1008, "Tunnel access policy rejected");
+                  return;
+                }
                 if (result.reserved) {
                   requestedSubdomain = candidate;
                   reservationAcquired = true;
@@ -651,6 +706,7 @@ export class WSHandler {
               tunnelId: fullHostname,
               url: tunnelUrl,
               plan,
+              access: access.access,
             });
 
             await countOpening(organizationId, "http");

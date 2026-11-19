@@ -3,7 +3,8 @@ import test from "node:test";
 import WebSocket from "ws";
 import { TunnelRouter, type TunnelMetadata } from "../src/core/TunnelRouter";
 
-const open = { readyState: WebSocket.OPEN, terminate() {}, send() {} } as unknown as WebSocket;
+const sent: string[] = [];
+const open = { readyState: WebSocket.OPEN, terminate() {}, send(data: string) { sent.push(data); } } as unknown as WebSocket;
 
 async function router(metadata: TunnelMetadata, available = true) {
   const instance = new TunnelRouter({ organizationAccessAvailable: () => available });
@@ -35,4 +36,16 @@ test("console access changes require the owning tunnel and cannot override passw
     assert.equal(r.applyAccessChange(message), false, JSON.stringify(message));
     assert.equal(r.getTunnelMetadata("app.example.test")?.access, metadata.access);
   }
+});
+
+test("clearing the console setting restores what the client asked for, including bypass paths", async () => {
+  const r = await router({ ...live, access: "public", requestedAccess: "organization", requestedAccessBypass: ["/hooks"] });
+  sent.length = 0;
+  assert.equal(r.applyAccessChange({ ...change, access: "default" }), true);
+  const metadata = r.getTunnelMetadata("app.example.test")!;
+  assert.equal(metadata.access, "organization");
+  assert.deepEqual(metadata.accessBypass, ["/hooks"]);
+  assert.deepEqual(JSON.parse(sent.at(-1)!), { type: "access_updated", access: "organization" });
+  assert.equal(r.applyAccessChange({ ...change, access: "public" }), true);
+  assert.equal(r.getTunnelMetadata("app.example.test")?.accessBypass, undefined);
 });

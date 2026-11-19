@@ -28,8 +28,9 @@ async function harness(t: TestContext, options: {
   check?: (body: Body) => Promise<Response> | Response;
   register?: (body: Body) => Promise<Response> | Response;
   organizationAccess?: boolean;
+  settings?: (body: Body, authorization: string | null) => Promise<Response> | Response;
 } = {}) {
-  const calls = { auth: [] as Body[], check: [] as Body[], register: [] as Body[], usage: [] as unknown[][] };
+  const calls = { auth: [] as Body[], check: [] as Body[], register: [] as Body[], usage: [] as unknown[][], settings: [] as Body[] };
   const router = new TunnelRouter({ redis: options.redis });
   const proxyTunnels = new Set<string>();
   const proxy = {
@@ -51,6 +52,10 @@ async function harness(t: TestContext, options: {
       return options.check?.(body) ?? Response.json({ allowed: true, type: "available" });
     }
     if (name === "verify-ownership") return Response.json({ valid: true });
+    if (name === "settings") {
+      calls.settings.push(body);
+      return options.settings?.(body, new Headers(init?.headers).get("authorization")) ?? Response.json({ access: null });
+    }
     if (name === "register") {
       calls.register.push(body);
       return options.register?.(body) ?? Response.json({ success: true, tunnelId: "db-a" });
@@ -97,7 +102,7 @@ test("protected tunnel features reject missing credentials before allocation", {
     assert.equal((await send(ws, { type: "open_tunnel", ...fields })).code, "AUTH_REQUIRED");
     await closed;
   }
-  assert.deepEqual(f.calls, { auth: [], check: [], register: [], usage: [] });
+  assert.deepEqual(f.calls, { auth: [], check: [], register: [], usage: [], settings: [] });
   assert.equal(f.proxyTunnels.size, 0);
 });
 
@@ -109,7 +114,7 @@ test("empty and malformed supplied credentials never fall back to guest access",
     assert.equal((await send(ws, { type: "open_tunnel", apiKey })).code, "AUTH_FAILED");
     await closed;
   }
-  assert.deepEqual(f.calls, { auth: [], check: [], register: [], usage: [] });
+  assert.deepEqual(f.calls, { auth: [], check: [], register: [], usage: [], settings: [] });
 });
 
 test("invalid credentials, unsuccessful auth responses and organization-less identities fail closed", { timeout: 5000 }, async t => {
@@ -394,7 +399,7 @@ test("guests cannot request organization access or bypass paths", { timeout: 500
     if (fields.access === "organization") assert.match(error.message, /organization login/);
     await closed;
   }
-  assert.deepEqual(f.calls, { auth: [], check: [], register: [], usage: [] });
+  assert.deepEqual(f.calls, { auth: [], check: [], register: [], usage: [], settings: [] });
 });
 
 test("organization access is paid-only, HTTP-only and exclusive with passwords", { timeout: 5000 }, async t => {
@@ -425,4 +430,63 @@ test("existing password clients keep password access without sending an access m
   const opened = await send(ws, { ...opening, password: "s3cret" });
   assert.equal(opened.type, "tunnel_opened");
   assert.equal(f.router.getTunnelMetadata(opened.tunnelId)?.access, "password");
+});
+
+test("a saved console setting overrides the client's access before the address is reserved", { timeout: 5000 }, async t => {
+  let reservedDuringLookup: boolean | undefined;
+  let router: TunnelRouter | undefined;
+  const f = await harness(t, { auth: paid, settings: (body, authorization) => {
+    assert.equal(authorization, "Bearer edge-secret");
+    reservedDuringLookup = router!.hasTunnel(body.host);
+    return Response.json({ access: "organization" });
+  } });
+  router = f.router;
+  const ws = await f.connect();
+  const opened = await send(ws, opening);
+  assert.equal(opened.type, "tunnel_opened");
+  assert.equal(opened.access, "organization");
+  assert.equal(reservedDuringLookup, false, "lookup completes before the address can serve traffic");
+  assert.deepEqual(f.calls.settings, [{ organizationId: "org-a", host: opened.tunnelId }]);
+  const metadata = f.router.getTunnelMetadata(opened.tunnelId)!;
+  assert.equal(metadata.access, "organization");
+  assert.equal(metadata.requestedAccess, "public");
+});
+
+test("a saved public setting relaxes an organization request and drops its bypass paths", { timeout: 5000 }, async t => {
+  const f = await harness(t, { auth: paid, settings: () => Response.json({ access: "public" }) });
+  const ws = await f.connect();
+  const opened = await send(ws, { ...opening, access: "organization", accessBypass: ["/hooks"] });
+  assert.equal(opened.access, "public");
+  const metadata = f.router.getTunnelMetadata(opened.tunnelId)!;
+  assert.equal(metadata.access, "public");
+  assert.equal(metadata.accessBypass, undefined);
+  assert.deepEqual(metadata.requestedAccessBypass, ["/hooks"]);
+});
+
+test("saved settings never apply to password tunnels, guests or TCP", { timeout: 5000 }, async t => {
+  const f = await harness(t, { auth: paid, settings: () => Response.json({ access: "public" }) });
+  for (const fields of [{ password: "s3cret" }, { protocol: "tcp" }]) {
+    const ws = await f.connect();
+    assert.equal((await send(ws, { ...opening, ...fields })).type, "tunnel_opened");
+  }
+  assert.equal(f.calls.settings.length, 0);
+});
+
+test("unreadable or unusable saved settings fail closed without reserving an address", { timeout: 5000 }, async t => {
+  for (const [options, code] of [
+    [{ auth: paid, settings: () => Response.json({ error: "down" }, { status: 503 }) }, "TUNNEL_UNAVAILABLE"],
+    [{ auth: paid, settings: () => { throw new Error("console unreachable"); } }, "TUNNEL_UNAVAILABLE"],
+    [{ settings: () => Response.json({ access: "organization" }) }, "ORG_ACCESS_REQUIRES_PAID"],
+    [{ auth: paid, organizationAccess: false, settings: () => Response.json({ access: "organization" }) }, "ORG_ACCESS_UNAVAILABLE"],
+  ] as Array<[Parameters<typeof harness>[1], string]>) {
+    for (const fields of [{}, { subdomain: null }, { customDomain: "preview.example.test" }]) {
+      const f = await harness(t, options);
+      const ws = await f.connect();
+      const closed = once(ws, "close");
+      assert.equal((await send(ws, { ...opening, ...fields })).code, code, JSON.stringify(fields));
+      await closed;
+      assert.equal(f.calls.register.length, 0);
+      assert.equal(f.calls.check.length, 0);
+    }
+  }
 });
