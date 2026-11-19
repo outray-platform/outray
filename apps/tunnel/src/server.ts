@@ -9,6 +9,7 @@ import { TCPProxy } from "./core/TCPProxy";
 import { UDPProxy } from "./core/UDPProxy";
 import { WSProxy } from "./core/WSProxy";
 import { LogManager } from "./core/LogManager";
+import { TunnelAccessGate } from "./lib/tunnel-access-gate";
 import { config } from "./config";
 import publicHosts from "../../../shared/public-hosts";
 import {
@@ -77,7 +78,17 @@ const router = new TunnelRouter({
 });
 const httpServer = createServer();
 const logManager = new LogManager();
-const proxy = new HTTPProxy(router, config.baseDomain, logManager);
+const webApiUrl = process.env.WEB_API_URL || "http://localhost:3000/api";
+const internalApiSecret = process.env.INTERNAL_API_SECRET;
+const accessGate = new TunnelAccessGate({
+  consoleUrl: config.accessConsoleUrl,
+  apiUrl: webApiUrl,
+  internalApiSecret,
+  cookieSecret: config.accessCookieSecret,
+  secureCookies: config.baseDomain !== "localhost.direct",
+  revalidateMs: config.accessRevalidateSeconds * 1000,
+});
+const proxy = new HTTPProxy(router, config.baseDomain, logManager, accessGate);
 
 console.log("🚨 BASE DOMAIN LOADED:", config.baseDomain);
 
@@ -97,13 +108,13 @@ const udpProxy = new UDPProxy(
 );
 
 const wsProxy = new WSProxy(router);
-const wsHandler = new WSHandler(wssTunnel, router, tcpProxy, udpProxy, wsProxy);
+const wsHandler = new WSHandler(wssTunnel, router, tcpProxy, udpProxy, wsProxy, () => accessGate.configured);
+if (!accessGate.configured) {
+  console.log("Organization-only tunnels disabled: set TUNNEL_ACCESS_CONSOLE_URL (or OUTRAY_DASHBOARD_URL) and INTERNAL_API_SECRET");
+}
 
 console.log("✅ TCP/UDP tunnel support enabled");
 console.log("✅ WebSocket passthrough enabled");
-
-const webApiUrl = process.env.WEB_API_URL || "http://localhost:3000/api";
-const internalApiSecret = process.env.INTERNAL_API_SECRET;
 
 async function validateDashboardToken(token: string): Promise<{
   valid: boolean;
