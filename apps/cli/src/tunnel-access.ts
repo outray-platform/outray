@@ -37,7 +37,7 @@ export function resolveAccessOptions(input: {
     return { ok: false, error: `${B} requires ${A} org` };
   }
   for (const prefix of accessBypass) {
-    if (!prefix.startsWith("/") || prefix === "/" || /[?#%\\\s]/.test(prefix) || prefix.includes("//") ||
+    if (!prefix.startsWith("/") || prefix === "/" || /[?#%;\\\s]/.test(prefix) || prefix.includes("//") ||
         prefix.split("/").some(segment => segment === "." || segment === "..")) {
       return { ok: false, error: `Invalid ${B} path "${prefix}". Use a plain absolute path such as /webhooks` };
     }

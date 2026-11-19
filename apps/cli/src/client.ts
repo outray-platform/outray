@@ -233,8 +233,16 @@ export class OutRayClient {
         // Keep subdomainConflictHandled to detect takeovers
         this.forceTakeover = false;
         this.reconnectAttempts = 0;
+        const access = (message as { access?: string }).access;
+        if (!access && this.access === "organization") {
+          // Edges that predate organization access ignore the request and would serve the tunnel publicly.
+          console.log(chalk.red("❌ This tunnel server doesn't support --access org, so the tunnel would be public. Stopping."));
+          this.shouldReconnect = false;
+          this.stop();
+          process.exit(1);
+        }
         console.log(chalk.magenta(`✨ Tunnel ready: ${message.url}`));
-        this.reportAccess((message as { access?: string }).access, false);
+        this.reportAccess(access, false);
         console.log(
           chalk.yellow("Keep this running to keep your tunnel active."),
         );

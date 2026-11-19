@@ -668,6 +668,11 @@ async function main() {
   const subdomain = getFlagValue(remainingArgs, "--subdomain");
   const customDomain = getFlagValue(remainingArgs, "--domain");
   const password = getFlagValue(remainingArgs, "--password");
+  const bypassFlags = remainingArgs.filter(arg => arg === "--access-bypass" || arg.startsWith("--access-bypass=")).length;
+  if (bypassFlags !== getFlagValues(remainingArgs, "--access-bypass").filter(value => value.trim()).length) {
+    console.log(chalk.red("❌ --access-bypass requires a path, for example --access-bypass /webhooks"));
+    process.exit(1);
+  }
   if (remainingArgs.some(arg => arg === "--access" || arg.startsWith("--access=")) && !getFlagValue(remainingArgs, "--access")) {
     console.log(chalk.red("❌ --access requires a mode: public, password or org"));
     process.exit(1);

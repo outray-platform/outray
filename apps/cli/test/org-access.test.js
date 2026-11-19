@@ -35,7 +35,7 @@ async function edge(t, reply) {
 
 test("--access org sends organization access and bypass prefixes in the handshake", { timeout: 5000 }, async t => {
   const server = await edge(t, ws => {
-    ws.send(JSON.stringify({ type: "tunnel_opened", tunnelId: "app.example.test", url: "https://app.example.test" }));
+    ws.send(JSON.stringify({ type: "tunnel_opened", tunnelId: "app.example.test", url: "https://app.example.test", access: "organization" }));
     ws.send(JSON.stringify({ type: "error", code: "AUTH_FAILED", message: "stop" }));
   });
   const f = cli(t, ["3000", "--key", "token", "--access", "org", "--access-bypass", "/webhooks", "--access-bypass=/health,/status"], server.url);
@@ -66,6 +66,9 @@ test("invalid access flag combinations fail before connecting", { timeout: 10000
     [["3000", "--key", "token", "--access", "org", "--access-bypass", "/a/../b"], /Invalid --access-bypass/],
     [["tcp", "5432", "--key", "token", "--access", "org"], /only for HTTP/],
     [["3000", "--key", "token", "--access", "password"], /requires --password/],
+    [["3000", "--key", "token", "--access", "org", "--access-bypass", "--subdomain", "x"], /--access-bypass requires a path/],
+    [["3000", "--key", "token", "--access", "org", "--access-bypass="], /--access-bypass requires a path/],
+    [["3000", "--key", "token", "--access", "org", "--access-bypass", "/hooks/..;"], /Invalid --access-bypass/],
   ]) {
     const f = cli(t, args, "ws://127.0.0.1:1");
     const [code] = await once(f.child, "close");
@@ -110,4 +113,13 @@ test("the CLI reports access saved or changed in the console", { timeout: 5000 }
   await once(f.child, "close");
   assert.match(f.output(), /Access: organization members only \(saved for this address in the console/);
   assert.match(f.output(), /Access changed in the console: public/);
+});
+
+test("an organization tunnel stops when the edge doesn't confirm organization access", { timeout: 5000 }, async t => {
+  const server = await edge(t, ws => ws.send(JSON.stringify({ type: "tunnel_opened", tunnelId: "app.example.test", url: "https://app.example.test" })));
+  const f = cli(t, ["3000", "--key", "token", "--access", "org"], server.url);
+  const [code] = await once(f.child, "close");
+  assert.equal(code, 1);
+  assert.match(f.output(), /doesn't support --access org/);
+  assert.doesNotMatch(f.output(), /Tunnel ready/);
 });
