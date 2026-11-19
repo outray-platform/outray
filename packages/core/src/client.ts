@@ -145,6 +145,13 @@ export class OutrayClient {
     try {
       const message = decodeMessage(data);
 
+      if (message.type === "tunnel_opened" && !message.access && this.options.access === "organization") {
+        // Edges that predate organization access ignore the request and would serve the tunnel publicly.
+        this.shouldReconnect = false;
+        this.options.onError?.(new Error("This tunnel server doesn't support organization access; refusing to run a public tunnel."), "ORG_ACCESS_UNSUPPORTED");
+        this.stop();
+        return;
+      }
       if (message.type === "tunnel_opened") {
         this.assignedUrl = message.url;
         const derivedSubdomain = this.extractSubdomain(message.url);

@@ -76,3 +76,14 @@ test("SDK callers hear the effective access on open and on console changes", () 
   control.handleMessage(JSON.stringify({ type: "access_updated", access: "public" }));
   assert.deepEqual(seen, ["organization", "public"]);
 });
+
+test("an organization tunnel refuses to run on an edge that ignores access", () => {
+  const codes: string[] = [];
+  let ready = false;
+  const client = new OutrayClient({ localPort: 3000, apiKey: "key", access: "organization", onTunnelReady: () => { ready = true; }, onError: (_error, code) => { codes.push(code!); } });
+  const control = client as unknown as { handleMessage(message: string): void; shouldReconnect: boolean };
+  control.handleMessage(JSON.stringify({ type: "tunnel_opened", url: "https://app.example.test" }));
+  assert.deepEqual(codes, ["ORG_ACCESS_UNSUPPORTED"]);
+  assert.equal(ready, false);
+  assert.equal(control.shouldReconnect, false);
+});
