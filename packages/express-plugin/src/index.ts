@@ -226,6 +226,8 @@ export default function outray(
         apiKey,
         subdomain,
         customDomain: options.customDomain,
+        access: options.access,
+        accessBypass: options.accessBypass,
         onTunnelReady: (url) => {
           if (!silent) {
             const colorUrl = `\x1b[36m${url}\x1b[0m`;

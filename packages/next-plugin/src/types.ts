@@ -21,6 +21,20 @@ export interface OutrayPluginOptions {
   customDomain?: string;
 
   /**
+   * Who may reach the tunnel. "organization" asks visitors to sign in with
+   * OutRay and admits only members of your organization. Requires an API key
+   * and a paid plan. Use accessBypass for webhook paths.
+   * @default 'public'
+   */
+  access?: "public" | "organization";
+
+  /**
+   * Path prefixes reachable without signing in, e.g. ['/webhooks'].
+   * Anyone can call these paths, so verify webhook signatures in your app.
+   */
+  accessBypass?: string[];
+
+  /**
    * API key for authentication
    * Can also be set via OUTRAY_API_KEY environment variable
    * @default process.env.OUTRAY_API_KEY
