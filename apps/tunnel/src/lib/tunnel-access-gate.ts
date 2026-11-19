@@ -159,8 +159,7 @@ export class TunnelAccessGate {
     try {
       const response = await this.post("/tunnel/access/redeem", { code, host });
       if (response.status >= 500) throw new AccessUnavailableError();
-      result = await response.json() as typeof result;
-      if (!response.ok) result = { valid: false };
+      result = response.ok ? await response.json() as typeof result : { valid: false };
     } catch {
       return respond(503, "Organization sign-in is temporarily unavailable");
     }
@@ -192,8 +191,7 @@ export class TunnelAccessGate {
       pending = (async () => {
         const response = await this.post("/tunnel/access/revalidate", identity);
         if (response.status >= 500) throw new AccessUnavailableError();
-        const body = await response.json() as { valid?: unknown };
-        const valid = response.ok && body?.valid === true;
+        const valid = response.ok && (await response.json() as { valid?: unknown })?.valid === true;
         if (valid) this.remember(identity);
         else this.verified.delete(key);
         return valid;

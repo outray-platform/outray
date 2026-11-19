@@ -190,3 +190,15 @@ test("public and password tunnels never intercept the callback path", { timeout:
   assert.equal(response.body, "app:/_outray/callback?code=abc");
   assert.equal(f.console.calls.length, 0);
 });
+
+test("console 4xx replies without JSON deny and clear the cookie rather than reporting an outage", { timeout: 5000 }, async t => {
+  const f = await accessFixture(t, { revalidateMs: 1_000 });
+  await f.tunnel(HOST);
+  const { cookie } = await f.signIn(HOST);
+  const fetch = f.console.fetch;
+  f.console.fetch = async (url, init) => String(url).endsWith("/revalidate") ? new Response("<html>nope</html>", { status: 404 }) : fetch(url, init);
+  f.advance(1_001);
+  const response = await f.send(HOST, "/", { ...navigate, cookie });
+  assert.equal(response.status, 302);
+  assert.match(String(response.headers["set-cookie"]), /Max-Age=0/);
+});

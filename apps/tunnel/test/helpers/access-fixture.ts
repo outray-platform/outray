@@ -69,7 +69,7 @@ export async function accessFixture(t: TestContext, options: Partial<TunnelAcces
   let now = Date.UTC(2026, 10, 19);
   const gate = new TunnelAccessGate({
     consoleUrl: CONSOLE, apiUrl: "https://console.example.test/api", internalApiSecret: "edge-secret",
-    secureCookies: true, fetch: console_.fetch, now: () => now, ...options,
+    secureCookies: true, fetch: (url, init) => console_.fetch(url, init), now: () => now, ...options,
   });
   const router = new TunnelRouter();
   t.after(() => router.shutdown());
