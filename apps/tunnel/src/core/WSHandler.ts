@@ -20,6 +20,7 @@ import { config } from "../config";
 import { randomUUID } from "node:crypto";
 import { GuestTunnelLimits, guestClientIp, type GuestLease } from "../lib/guest-tunnels";
 import { recordTunnelOpening } from "../lib/product-usage";
+import { resolveTunnelAccess } from "../lib/tunnel-access-policy";
 import { withTunnelReservationLock, TunnelReservationBusyError } from "../../../../shared/tunnel-reservation-lock";
 
 export class WSHandler {
@@ -30,6 +31,7 @@ export class WSHandler {
   private wsProxy: WSProxy | null;
   private webApiUrl: string;
   private guestLimits: GuestTunnelLimits;
+  private organizationAccessAvailable: () => boolean;
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private readonly HEARTBEAT_INTERVAL_MS = 30000; // 30 seconds
 
@@ -39,8 +41,10 @@ export class WSHandler {
     tcpProxy?: TCPProxy,
     udpProxy?: UDPProxy,
     wsProxy?: WSProxy,
+    organizationAccessAvailable: () => boolean = () => false,
   ) {
     this.router = router;
+    this.organizationAccessAvailable = organizationAccessAvailable;
     this.guestLimits = new GuestTunnelLimits(router.getRedis(), Math.max(30, config.redisTunnelTtlSeconds) * 1000);
     this.wss = wss;
     this.tcpProxy = tcpProxy || new TCPProxy();
@@ -329,8 +333,12 @@ export class WSHandler {
                 return;
               }
             } else {
-              if (tunnelProtocol !== "http" || message.customDomain || message.password || message.forceTakeover) {
-                ws.send(Protocol.encode({ type: "error", code: "AUTH_REQUIRED", message: "Authentication required for this tunnel feature" }));
+              if (tunnelProtocol !== "http" || message.customDomain || message.password || message.forceTakeover ||
+                  (message.access !== undefined && message.access !== "public") || message.accessBypass !== undefined) {
+                const reason = message.access === "organization"
+                  ? "Organization-only tunnels require an organization login. Run outray login."
+                  : "Authentication required for this tunnel feature";
+                ws.send(Protocol.encode({ type: "error", code: "AUTH_REQUIRED", message: reason }));
                 ws.close(1008, "Authentication required");
                 return;
               }
@@ -346,6 +354,19 @@ export class WSHandler {
             if (closed || ws.readyState !== WebSocket.OPEN) return;
             activeProtocol = tunnelProtocol;
             const { organizationId, userId, bandwidthLimit, retentionDays, plan, fullCaptureEnabled } = identity;
+
+            const accessPolicy = resolveTunnelAccess(message, { authenticated: identity.valid === true, protocol: tunnelProtocol, plan });
+            if (!accessPolicy.ok) {
+              ws.send(Protocol.encode({ type: "error", code: accessPolicy.code, message: accessPolicy.message }));
+              ws.close(1008, "Tunnel access policy rejected");
+              return;
+            }
+            if (accessPolicy.access === "organization" && !this.organizationAccessAvailable()) {
+              ws.send(Protocol.encode({ type: "error", code: "ORG_ACCESS_UNAVAILABLE", message: "Organization-only tunnels are not enabled on this server" }));
+              ws.close(1008, "Organization access unavailable");
+              return;
+            }
+            const access = { access: accessPolicy.access, accessBypass: accessPolicy.accessBypass };
 
             // Gate password protection: only paid plans can use --password
             if (message.password && (!plan || plan === "free")) {
@@ -437,7 +458,7 @@ export class WSHandler {
               const tunnelUrl = `https://${message.customDomain}`;
               allocated.add(message.customDomain);
               if (!await this.router.reserveTunnel(message.customDomain, ws, {
-                organizationId, userId, bandwidthLimit, retentionDays, plan, fullCaptureEnabled, password: message.password,
+                organizationId, userId, bandwidthLimit, retentionDays, plan, fullCaptureEnabled, password: message.password, ...access,
               }, message.forceTakeover || false)) {
                 ws.send(Protocol.encode({ type: "error", code: "DOMAIN_IN_USE", message: "Custom domain is already in use" }));
                 ws.close();
@@ -480,6 +501,7 @@ export class WSHandler {
                   plan,
                   fullCaptureEnabled,
                   password: message.password,
+                  ...access,
                 },
               );
 
@@ -516,7 +538,7 @@ export class WSHandler {
               allocated.add(`${subdomain}.${config.baseDomain}`);
               const result = await this.reserveSubdomain(subdomain, ws, {
                 organizationId, userId, bandwidthLimit, retentionDays, fullCaptureEnabled,
-                ...guestLease, password: message.password,
+                ...guestLease, password: message.password, ...access,
               }, message.forceTakeover || false);
               return result;
             };
@@ -602,6 +624,7 @@ export class WSHandler {
                 plan,
                 fullCaptureEnabled,
                 password: message.password,
+                ...access,
               },
             );
 

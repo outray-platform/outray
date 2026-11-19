@@ -28,6 +28,8 @@ export interface TunnelMetadata {
   plan?: string;
   fullCaptureEnabled?: boolean;
   password?: string;
+  access?: "public" | "password" | "organization";
+  accessBypass?: string[];
   expiresAt?: number;
   guestLeaseKey?: string;
   guestSessionId?: string;
