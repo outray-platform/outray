@@ -16,7 +16,7 @@ export async function loadWSHandler(fetch: typeof globalThis.fetch, recordTunnel
     module, exports: module.exports,
     require: (specifier: string) => specifier === "../lib/product-usage" ? { recordTunnelOpening } : require(specifier),
     process: { env: { WEB_API_URL: "https://control.example.test/api", INTERNAL_API_SECRET: "edge-secret" } },
-    fetch, console: { log() {}, error() {} }, Buffer, setInterval, clearInterval,
+    fetch, console: { log() {}, error() {} }, Buffer, setInterval, clearInterval, AbortSignal,
   });
   return module.exports.WSHandler;
 }

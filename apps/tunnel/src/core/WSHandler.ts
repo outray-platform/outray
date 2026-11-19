@@ -232,10 +232,37 @@ export class WSHandler {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.INTERNAL_API_SECRET ?? ""}` },
       body: JSON.stringify({ organizationId, host }),
+      signal: AbortSignal.timeout(5_000),
     });
+    // A console without the endpoint predates saved settings, so none can exist.
+    if (response.status === 404) return null;
     if (!response.ok) throw new Error(`Access settings lookup failed: ${response.status}`);
     const body = await response.json() as { access?: unknown };
     return body?.access === "public" || body?.access === "organization" ? body.access : null;
+  }
+
+  /**
+   * A setting saved while the tunnel was opening never reaches it: the console
+   * only publishes to leases that already carry a dbTunnelId. Re-read it once
+   * registration has completed, so later saves are delivered live.
+   */
+  private async reconcileSavedAccess(hostname: string, metadata: TunnelMetadata): Promise<boolean> {
+    if (!metadata.organizationId || !metadata.dbTunnelId || metadata.requestedAccess === "password" || !this.organizationAccessAvailable()) return true;
+    try {
+      const saved = await this.fetchAccessOverride(metadata.organizationId, hostname);
+      const target = saved ?? "default";
+      const current = this.router.getTunnelMetadata(hostname)?.access;
+      const wanted = saved ?? (metadata.requestedAccess === "organization" ? "organization" : "public");
+      if (current === wanted) return true;
+      // tunnel_opened carries the result, so the client needs no separate update.
+      return this.router.applyAccessChange(
+        { tunnelId: hostname, organizationId: metadata.organizationId, dbTunnelId: metadata.dbTunnelId, access: target },
+        { notifyClient: false },
+      );
+    } catch (error) {
+      console.error("Failed to reconcile tunnel access settings:", error);
+      return false;
+    }
   }
 
   private async verifyCustomDomain(
@@ -387,7 +414,10 @@ export class WSHandler {
             let access = requested;
             // Resolved before an address is reserved, so a console-gated address is never briefly public.
             const accessFor = async (hostname: string): Promise<{ ok: true; value: typeof requested } | { ok: false; code: string; message: string }> => {
-              if (!organizationId || tunnelProtocol !== "http" || requested.access === "password") return { ok: true, value: requested };
+              // Without a configured gate this edge has organization access switched off, so it has no saved settings to honour.
+              if (!organizationId || tunnelProtocol !== "http" || requested.access === "password" || !this.organizationAccessAvailable()) {
+                return { ok: true, value: requested };
+              }
               let override: "public" | "organization" | null;
               try {
                 override = await this.fetchAccessOverride(organizationId, hostname);
@@ -562,6 +592,11 @@ export class WSHandler {
                 ws.close();
                 return;
               }
+              if (!await this.reconcileSavedAccess(message.customDomain, { ...access, organizationId, dbTunnelId })) {
+                ws.send(Protocol.encode({ type: "error", code: "TUNNEL_UNAVAILABLE", message: "Could not load this tunnel's access settings. Try again." }));
+                ws.close(1011, "Tunnel access settings unavailable");
+                return;
+              }
 
               await countOpening(organizationId, "http");
               if (closed || ws.readyState !== WebSocket.OPEN) return;
@@ -571,7 +606,7 @@ export class WSHandler {
                   tunnelId,
                   url: tunnelUrl,
                   plan,
-                  access: access.access,
+                  access: this.router.getTunnelMetadata(message.customDomain)?.access ?? access.access,
                 }),
               );
               console.log(`Tunnel opened with custom domain: ${tunnelId}`);
@@ -696,6 +731,11 @@ export class WSHandler {
               ws.close();
               return;
             }
+            if (!await this.reconcileSavedAccess(fullHostname, { ...access, organizationId, dbTunnelId })) {
+              ws.send(Protocol.encode({ type: "error", code: "TUNNEL_UNAVAILABLE", message: "Could not load this tunnel's access settings. Try again." }));
+              ws.close(1011, "Tunnel access settings unavailable");
+              return;
+            }
 
             // Update tunnelId to full hostname for message routing
             tunnelId = fullHostname;
@@ -706,7 +746,7 @@ export class WSHandler {
               tunnelId: fullHostname,
               url: tunnelUrl,
               plan,
-              access: access.access,
+              access: this.router.getTunnelMetadata(fullHostname)?.access ?? access.access,
             });
 
             await countOpening(organizationId, "http");

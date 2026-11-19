@@ -18,6 +18,7 @@ interface TunnelRouterOptions {
   heartbeatIntervalMs?: number;
   requestTimeoutMs?: number;
   organizationAccessAvailable?: () => boolean;
+  onAccessChanged?: (tunnelId: string) => void;
 }
 
 export interface TunnelMetadata {
@@ -53,6 +54,7 @@ export class TunnelRouter {
   private expiryTimers = new Map<string, NodeJS.Timeout>();
   private connectionIds = new WeakMap<WebSocket, string>();
   private readonly organizationAccessAvailable: () => boolean;
+  private readonly onAccessChanged?: (tunnelId: string) => void;
 
   constructor(options: TunnelRouterOptions = {}) {
     this.redis = options.redis;
@@ -63,6 +65,7 @@ export class TunnelRouter {
     );
     this.requestTimeoutMs = options.requestTimeoutMs ?? 60000;
     this.organizationAccessAvailable = options.organizationAccessAvailable ?? (() => false);
+    this.onAccessChanged = options.onAccessChanged;
 
     if (this.redis) {
       this.startHeartbeat();
@@ -141,7 +144,10 @@ export class TunnelRouter {
    * for the hostname, so reconnects keep it; "default" restores what the client asked for.
    * Password tunnels keep their mode.
    */
-  applyAccessChange(change: { tunnelId?: string; organizationId?: string; dbTunnelId?: string; access?: string }): boolean {
+  applyAccessChange(
+    change: { tunnelId?: string; organizationId?: string; dbTunnelId?: string; access?: string },
+    { notifyClient = true }: { notifyClient?: boolean } = {},
+  ): boolean {
     if (!change.tunnelId || !["public", "organization", "default"].includes(change.access ?? "")) return false;
     const ws = this.tunnels.get(change.tunnelId);
     const metadata = this.tunnelMetadata.get(change.tunnelId);
@@ -160,7 +166,8 @@ export class TunnelRouter {
     else delete updated.accessBypass;
     this.tunnelMetadata.set(change.tunnelId, updated);
     void this.persistTunnelState(change.tunnelId, "XX", ws, updated);
-    if (ws.readyState === WebSocket.OPEN) ws.send(Protocol.encode({ type: "access_updated", access }));
+    if (notifyClient && ws.readyState === WebSocket.OPEN) ws.send(Protocol.encode({ type: "access_updated", access }));
+    this.onAccessChanged?.(change.tunnelId);
     console.log(`Tunnel ${change.tunnelId} access set to ${access} from the console`);
     return true;
   }

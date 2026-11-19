@@ -31,7 +31,7 @@ async function harness(t: TestContext, options: {
   settings?: (body: Body, authorization: string | null) => Promise<Response> | Response;
 } = {}) {
   const calls = { auth: [] as Body[], check: [] as Body[], register: [] as Body[], usage: [] as unknown[][], settings: [] as Body[] };
-  const router = new TunnelRouter({ redis: options.redis });
+  const router = new TunnelRouter({ redis: options.redis, organizationAccessAvailable: () => options.organizationAccess ?? true });
   const proxyTunnels = new Set<string>();
   const proxy = {
     async createTunnel(id: string) { proxyTunnels.add(id); return { success: true, port: 23456 }; },
@@ -437,7 +437,7 @@ test("a saved console setting overrides the client's access before the address i
   let router: TunnelRouter | undefined;
   const f = await harness(t, { auth: paid, settings: (body, authorization) => {
     assert.equal(authorization, "Bearer edge-secret");
-    reservedDuringLookup = router!.hasTunnel(body.host);
+    reservedDuringLookup ??= router!.hasTunnel(body.host);
     return Response.json({ access: "organization" });
   } });
   router = f.router;
@@ -446,7 +446,8 @@ test("a saved console setting overrides the client's access before the address i
   assert.equal(opened.type, "tunnel_opened");
   assert.equal(opened.access, "organization");
   assert.equal(reservedDuringLookup, false, "lookup completes before the address can serve traffic");
-  assert.deepEqual(f.calls.settings, [{ organizationId: "org-a", host: opened.tunnelId }]);
+  assert.deepEqual(f.calls.settings, [{ organizationId: "org-a", host: opened.tunnelId }, { organizationId: "org-a", host: opened.tunnelId }],
+    "looked up before reserving and again after registration");
   const metadata = f.router.getTunnelMetadata(opened.tunnelId)!;
   assert.equal(metadata.access, "organization");
   assert.equal(metadata.requestedAccess, "public");
@@ -477,7 +478,6 @@ test("unreadable or unusable saved settings fail closed without reserving an add
     [{ auth: paid, settings: () => Response.json({ error: "down" }, { status: 503 }) }, "TUNNEL_UNAVAILABLE"],
     [{ auth: paid, settings: () => { throw new Error("console unreachable"); } }, "TUNNEL_UNAVAILABLE"],
     [{ settings: () => Response.json({ access: "organization" }) }, "ORG_ACCESS_REQUIRES_PAID"],
-    [{ auth: paid, organizationAccess: false, settings: () => Response.json({ access: "organization" }) }, "ORG_ACCESS_UNAVAILABLE"],
   ] as Array<[Parameters<typeof harness>[1], string]>) {
     for (const fields of [{}, { subdomain: null }, { customDomain: "preview.example.test" }]) {
       const f = await harness(t, options);
@@ -489,4 +489,37 @@ test("unreadable or unusable saved settings fail closed without reserving an add
       assert.equal(f.calls.check.length, 0);
     }
   }
+});
+
+test("a setting saved while the tunnel was opening is applied once registration completes", { timeout: 5000 }, async t => {
+  let lookups = 0;
+  const f = await harness(t, { auth: paid, settings: () => Response.json({ access: ++lookups === 1 ? null : "organization" }) });
+  const ws = await f.connect();
+  const opened = await send(ws, opening);
+  assert.equal(opened.type, "tunnel_opened", JSON.stringify(opened));
+  assert.equal(opened.access, "organization");
+  assert.equal(f.router.getTunnelMetadata(opened.tunnelId)?.access, "organization");
+  assert.equal(lookups, 2);
+});
+
+test("a failed post-registration lookup closes the tunnel instead of serving it with stale access", { timeout: 5000 }, async t => {
+  let lookups = 0;
+  const f = await harness(t, { auth: paid, settings: () => {
+    if (++lookups === 2) throw new Error("console unreachable");
+    return Response.json({ access: null });
+  } });
+  const ws = await f.connect();
+  const closed = once(ws, "close");
+  assert.equal((await send(ws, opening)).code, "TUNNEL_UNAVAILABLE");
+  await closed;
+  await eventually(() => f.router.getTunnelMetadata(`${opening.subdomain}.localhost.direct`) === undefined);
+});
+
+test("saved settings are skipped where organization access is off, and a console without the endpoint means none", { timeout: 5000 }, async t => {
+  const off = await harness(t, { auth: paid, organizationAccess: false, settings: () => Response.json({ access: "organization" }) });
+  assert.equal((await send(await off.connect(), opening)).access, "public");
+  assert.equal(off.calls.settings.length, 0);
+  const old = await harness(t, { auth: paid, settings: () => new Response("Not found", { status: 404 }) });
+  assert.equal((await send(await old.connect(), opening)).access, "public");
+  assert.equal(old.calls.settings.length, 2);
 });
